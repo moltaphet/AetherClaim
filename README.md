@@ -102,6 +102,14 @@ Examples, with per-source tiers listed:
 | 3 / outage / 1 | lower of 3, 1 = 1 (policyholder only) | 30% |
 | 3 / 0 / outage | lower of 3, 0 = 0 (policyholder only) | 0%. See the limitation in §2 |
 
+**Infrastructure corroboration disclosure.** Both the Open-Meteo ERA5 leg and
+the Open-Meteo GFS leg originate from the same underlying hosting infrastructure.
+The "three sources" are therefore two infrastructure providers, not three, and a
+single host outage or fault can remove or corrupt two legs at once. Before a
+mainnet deployment, distinct independent endpoints should be integrated, such as
+direct NOAA enterprise feeds and ECMWF API access, to eliminate correlated host
+outages. The full discussion is in §5.
+
 **Why the median and not the minimum of three.** The spec allowed "the
 conservative lower tier, or the median". The minimum of three is not safe here.
 A minimum rises whenever a source drops out, so a policyholder who could see the
@@ -239,7 +247,20 @@ is about how the realised payout tracks the risk the premium priced:
 6. **Weather sources are public APIs, not a hardware oracle.** NASA POWER is a
    reanalysis product with a publication lag. The premium is a flat 8% with no
    actuarial pricing.
-7. **Not audited.** This is hackathon-grade code.
+7. **Strict tier equivalence vs. boundary liveness.** `median_deficit` has a ±5
+   point telemetry tolerance, but `tier` is compared exactly. If two validators
+   read values that straddle a tier boundary (49% is Tier 1, 50% is Tier 2),
+   they disagree on the tier, consensus fails, and the leader rotates. This is an
+   intentional trade-off. It puts zero economic drift ahead of boundary liveness,
+   which is the steward's core requirement that no single policy can settle at
+   divergent payouts. The failure mode is a stall, never a split payout. A stall
+   is only possible when validators read different values, and it is bounded by
+   the grace period. If the disagreement persisted to day 30, the evaluation
+   window would close and the policy would expire without a payout, so a policy
+   whose reading sits on a boundary carries that risk. A bucketed or tolerant
+   tier comparison would remove the stall but would reintroduce divergent
+   payouts, so it is not offered.
+8. **Not audited.** This is hackathon-grade code.
 
 ## 2b. Audit remediation
 
