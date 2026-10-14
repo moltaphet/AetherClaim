@@ -1,0 +1,8 @@
+{
+  "network": "GenLayer Studio Next",
+  "chainId": 61997,
+  "rpc": "https://studio-next.genlayer.com/api",
+  "address": "0xD368f35b238d84Bfd1024441992Cc2d04276bf79",
+  "deployedAt": "2026-10-14",
+  "note": "constructor arg max_epoch_exposure=5 GEN; liquidity seed not yet sent"
+}

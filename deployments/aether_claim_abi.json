@@ -1,0 +1,228 @@
+{
+  "ctor": {
+    "params": [
+      [
+        "max_epoch_exposure",
+        "int"
+      ]
+    ],
+    "kwparams": {}
+  },
+  "methods": {
+    "activate_plot": {
+      "params": [
+        [
+          "plot_id",
+          "string"
+        ]
+      ],
+      "kwparams": {},
+      "readonly": false,
+      "ret": "null",
+      "payable": false
+    },
+    "create_policy": {
+      "params": [
+        [
+          "plot_id",
+          "string"
+        ],
+        [
+          "coverage_amount",
+          "int"
+        ]
+      ],
+      "kwparams": {},
+      "readonly": false,
+      "ret": "string",
+      "payable": true
+    },
+    "deactivate_plot": {
+      "params": [
+        [
+          "plot_id",
+          "string"
+        ]
+      ],
+      "kwparams": {},
+      "readonly": false,
+      "ret": "null",
+      "payable": false
+    },
+    "evaluate_claim": {
+      "params": [
+        [
+          "policy_id",
+          "string"
+        ]
+      ],
+      "kwparams": {},
+      "readonly": false,
+      "ret": "dict",
+      "payable": false
+    },
+    "expire_policy": {
+      "params": [
+        [
+          "policy_id",
+          "string"
+        ]
+      ],
+      "kwparams": {},
+      "readonly": false,
+      "ret": "null",
+      "payable": false
+    },
+    "get_claim": {
+      "params": [
+        [
+          "policy_id",
+          "string"
+        ]
+      ],
+      "kwparams": {},
+      "readonly": true,
+      "ret": "dict"
+    },
+    "get_config": {
+      "params": [],
+      "kwparams": {},
+      "readonly": true,
+      "ret": "dict"
+    },
+    "get_plot": {
+      "params": [
+        [
+          "plot_id",
+          "string"
+        ]
+      ],
+      "kwparams": {},
+      "readonly": true,
+      "ret": "dict"
+    },
+    "get_policy": {
+      "params": [
+        [
+          "policy_id",
+          "string"
+        ]
+      ],
+      "kwparams": {},
+      "readonly": true,
+      "ret": "dict"
+    },
+    "get_pool": {
+      "params": [],
+      "kwparams": {},
+      "readonly": true,
+      "ret": "dict"
+    },
+    "list_plots": {
+      "params": [],
+      "kwparams": {},
+      "readonly": true,
+      "ret": "array"
+    },
+    "list_policies": {
+      "params": [
+        [
+          "holder_hex",
+          "string"
+        ]
+      ],
+      "kwparams": {},
+      "readonly": true,
+      "ret": "array"
+    },
+    "provide_liquidity": {
+      "params": [],
+      "kwparams": {},
+      "readonly": false,
+      "ret": "null",
+      "payable": true
+    },
+    "release_payout": {
+      "params": [
+        [
+          "policy_id",
+          "string"
+        ]
+      ],
+      "kwparams": {},
+      "readonly": false,
+      "ret": "int",
+      "payable": false
+    },
+    "set_max_epoch_exposure": {
+      "params": [
+        [
+          "amount",
+          "int"
+        ]
+      ],
+      "kwparams": {},
+      "readonly": false,
+      "ret": "null",
+      "payable": false
+    },
+    "stage_plot": {
+      "params": [
+        [
+          "plot_id",
+          "string"
+        ],
+        [
+          "name",
+          "string"
+        ],
+        [
+          "crop_type",
+          "string"
+        ],
+        [
+          "latitude_e4",
+          "int"
+        ],
+        [
+          "longitude_e4",
+          "int"
+        ],
+        [
+          "baseline_rainfall_mm",
+          "int"
+        ],
+        [
+          "cadastral_hash",
+          "string"
+        ],
+        [
+          "crop_cycle",
+          "string"
+        ]
+      ],
+      "kwparams": {},
+      "readonly": false,
+      "ret": "null",
+      "payable": false
+    },
+    "whoami": {
+      "params": [],
+      "kwparams": {},
+      "readonly": true,
+      "ret": "string"
+    },
+    "withdraw_liquidity": {
+      "params": [
+        [
+          "amount",
+          "int"
+        ]
+      ],
+      "kwparams": {},
+      "readonly": false,
+      "ret": "null",
+      "payable": false
+    }
+  }
+}

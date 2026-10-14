@@ -1,0 +1,16 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root { color-scheme: dark; }
+body {
+  background:
+    radial-gradient(1200px 500px at 85% -10%, rgba(233,196,106,.08), transparent 60%),
+    radial-gradient(900px 500px at -10% 110%, rgba(143,209,106,.07), transparent 60%),
+    #0b0d0a;
+  color: #e7eadf;
+}
+.card { @apply rounded-xl border border-line bg-furrow/80 backdrop-blur; }
+.btn { @apply inline-flex items-center justify-center rounded-lg border border-wheat/60 px-4 py-2 text-sm font-medium text-wheat transition hover:bg-wheat hover:text-soil disabled:cursor-not-allowed disabled:opacity-40; }
+.btn-solid { @apply bg-wheat text-soil hover:bg-wheat/80; }
+.label { @apply font-mono text-[11px] uppercase tracking-[0.18em] text-mist; }
