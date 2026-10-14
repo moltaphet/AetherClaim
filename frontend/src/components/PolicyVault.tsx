@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useMemo, useState } from "react";
-import { api, ATTO, EXPIRY_GRACE_DAYS, fromAtto, GENESIS_PLOTS, GENESIS_POOL, nextInsurableStart, PREMIUM_BPS, termInsideCycle, termWindowsInsurable, Plot, Pool, TIERS, toAtto, writeCall } from "@/lib/contract";
+import { api, ATTO, EXPIRY_GRACE_DAYS, fromAtto, GENESIS_PLOTS, GENESIS_POOL, nextInsurableStart, PREMIUM_BPS, termInsideCycle, termWindowsInsurable, Plot, Pool, TIERS, MIN_COVERAGE_ATTO, Notice, NOTICE_CLASS, noticeFromError, noticeFromWrite, parseGen, writeCall } from "@/lib/contract";
+import SyncAlert from "./SyncAlert";
 import SyncBadge from "./SyncBadge";
 import WalletSimNote from "./WalletSimNote";
 import { useWallet } from "@/lib/useAether";
@@ -11,20 +12,27 @@ export default function PolicyVault({ plotId, onChange }: { plotId: string | nul
   const [pool, setPool] = useState<Pool>(GENESIS_POOL);
   const [plot, setPlot] = useState<string>(plotId ?? GENESIS_PLOTS[0].plot_id);
   const [coverage, setCoverage] = useState("0.5");
-  const slider = Math.min(5, Math.max(0.01, parseFloat(coverage) || 0));
   const [busy, setBusy] = useState(false);
-  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [notice, setNotice] = useState<Notice | null>(null);
+  const [poolLive, setPoolLive] = useState(false);
 
   const load = () => {
     api.plots().then((r) => setPlots(r.data));
-    api.pool().then((r) => setPool(r.data));
+    api.pool().then((r) => {
+      setPoolLive(r.live);
+      if (r.live) setPool(r.data);
+    });
   };
   useEffect(load, []);
   useEffect(() => {
     if (plotId) setPlot(plotId);
   }, [plotId]);
 
-  const cov = useMemo(() => toAtto(coverage), [coverage]);
+  // Strict parse: a negative, zero, empty or non-numeric entry is an error, never
+  // "fixed" into a positive number.
+  const parsed = useMemo(() => parseGen(coverage, MIN_COVERAGE_ATTO), [coverage]);
+  const cov = parsed.ok ? parsed.value : 0n;
+  const slider = parsed.ok ? Math.min(5, Math.max(0.01, Number(parsed.value) / 1e18)) : 0.01;
   const selectedPlot = plots.find((p) => p.plot_id === plot) ?? plots[0];
   const inSeason = selectedPlot ? termInsideCycle(selectedPlot) : true;
   const windowsPayable = selectedPlot ? termWindowsInsurable(selectedPlot) : true;
@@ -33,14 +41,15 @@ export default function PolicyVault({ plotId, onChange }: { plotId: string | nul
   const buy = async () => {
     if (!account) return connect();
     setBusy(true);
-    setMsg(null);
+    if (!parsed.ok) return;
+    setNotice(null);
     try {
-      const r = await writeCall(account, "create_policy", [plot || plots[0]?.plot_id, cov], premium);
-      setMsg({ ok: true, text: `Policy submitted · ${r.status} · ${r.hash.slice(0, 12)}…` });
+      const r = await writeCall(account, "create_policy", [plot || plots[0]?.plot_id, parsed.value], premium);
+      setNotice(noticeFromWrite("create_policy", r));
       load();
       onChange();
-    } catch (e: any) {
-      setMsg({ ok: false, text: e?.shortMessage ?? e?.message ?? "Transaction failed" });
+    } catch (e) {
+      setNotice(noticeFromError(e));
     } finally {
       setBusy(false);
     }
@@ -74,8 +83,10 @@ export default function PolicyVault({ plotId, onChange }: { plotId: string | nul
               value={coverage}
               onChange={(e) => setCoverage(e.target.value)}
               inputMode="decimal"
+              aria-invalid={!parsed.ok}
               className="mt-1 w-full rounded-lg border border-line bg-loam px-3 py-2 font-mono text-sm"
             />
+            {!parsed.ok && <p className="mt-1 font-mono text-[11px] text-rust">{parsed.error}</p>}
             <input
               type="range"
               min={0.01}
@@ -95,7 +106,7 @@ export default function PolicyVault({ plotId, onChange }: { plotId: string | nul
           <Stat k="Term" v="90 days" />
         </div>
 
-        <button className="btn btn-solid mt-6 w-full" disabled={busy || cov <= 0n || !inSeason || !windowsPayable || (!!account && !chainOk)} onClick={buy}>
+        <button className="btn btn-solid mt-6 w-full" disabled={busy || !parsed.ok || !inSeason || !windowsPayable || (!!account && !chainOk)} onClick={buy}>
           {!account ? "Connect wallet to buy" : busy ? "Awaiting consensus…" : `Pay ${fromAtto(premium, 5)} GEN premium`}
         </button>
         {!inSeason && selectedPlot && (
@@ -123,7 +134,7 @@ export default function PolicyVault({ plotId, onChange }: { plotId: string | nul
         )}
         <p className="mt-3 text-xs text-mist">The protocol admin address cannot hold policies (anti self-dealing).</p>
         <WalletSimNote />
-        {msg && <p className={`mt-3 text-sm ${msg.ok ? "text-sprout" : "text-rust"}`}>{msg.text}</p>}
+        {notice && <p className={`mt-3 text-sm ${NOTICE_CLASS[notice.tone]}`}>{notice.text}</p>}
         <p className="mt-4 text-xs text-mist">
           The verdict covers only the final 28 days of your term, fixed at purchase. Evaluation opens 6 days
           after the term ends and stays open for {EXPIRY_GRACE_DAYS} days, so an outage cannot forfeit a claim.
@@ -148,16 +159,21 @@ export default function PolicyVault({ plotId, onChange }: { plotId: string | nul
         </div>
         <div className="card p-5">
           <div className="label">Pool solvency</div>
+          {!poolLive && (
+            <div className="mt-3">
+              <SyncAlert what="Pool solvency" />
+            </div>
+          )}
           <>
               <div className="mt-2 grid grid-cols-2 gap-3 text-sm">
-                <Stat k="Pool" v={`${fromAtto(pool.pool_balance, 3)} GEN`} />
-                <Stat k="Reserved" v={`${fromAtto(pool.total_liabilities, 3)} GEN`} />
+                <Stat k="Pool" v={poolLive ? `${fromAtto(pool.pool_balance, 3)} GEN` : "—"} />
+                <Stat k="Reserved" v={poolLive ? `${fromAtto(pool.total_liabilities, 3)} GEN` : "—"} />
               </div>
               <div className="mt-4">
                 <div className="flex justify-between font-mono text-[11px] text-mist">
                   <span>epoch {pool.epoch} exposure</span>
                   <span>
-                    {fromAtto(pool.epoch_exposure, 2)} / {fromAtto(pool.max_epoch_exposure, 2)}
+                    {poolLive ? `${fromAtto(pool.epoch_exposure, 2)} / ${fromAtto(pool.max_epoch_exposure, 2)}` : "—"}
                   </span>
                 </div>
                 <div className="mt-1 h-2 rounded-full bg-loam">

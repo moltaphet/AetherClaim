@@ -223,7 +223,112 @@ export async function ensureChain(p: Eip1193): Promise<void> {
 export interface WriteResult {
   hash: string;
   status: string;
+  /** true only when the receipt positively reports FINISHED_WITH_RETURN. */
+  verified: boolean;
 }
+
+/** The transaction was accepted into a block but execution failed or did not agree. */
+export class TxRevertedError extends Error {
+  hash: string;
+  constructor(detail: string, hash: string) {
+    super(`Transaction Reverted on-chain: ${detail}`);
+    this.name = "TxRevertedError";
+    this.hash = hash;
+  }
+}
+
+const EXEC_NAMES = [
+  "NOT_VOTED",
+  "FINISHED_WITH_RETURN",
+  "FINISHED_WITH_ERROR",
+  "TIMEOUT",
+  "NONDET_DISAGREE",
+  "DETERMINISTIC_VIOLATION",
+];
+const EXEC_FAILURES = new Set(["FINISHED_WITH_ERROR", "TIMEOUT", "NONDET_DISAGREE", "DETERMINISTIC_VIOLATION"]);
+const RESULT_FAILURES = new Set([
+  "DISAGREE",
+  "TIMEOUT",
+  "DETERMINISTIC_VIOLATION",
+  "NO_MAJORITY",
+  "MAJORITY_DISAGREE",
+  "MAJORITY_TIMEOUT",
+]);
+const STATUS_FAILURES = new Set(["UNDETERMINED", "CANCELED", "LEADER_TIMEOUT", "VALIDATORS_TIMEOUT"]);
+
+type ReceiptLike = {
+  statusName?: string;
+  resultName?: string;
+  txExecutionResult?: number;
+  txExecutionResultName?: string;
+};
+
+/**
+ * An ACCEPTED status is not success: a contract that raised still produces an
+ * accepted transaction. Read the execution result and the consensus result.
+ */
+export function assessReceipt(r: ReceiptLike | null | undefined): { state: "success" | "reverted" | "unverified"; detail: string } {
+  if (!r) return { state: "unverified", detail: "no receipt returned" };
+  const exec =
+    r.txExecutionResultName ??
+    (typeof r.txExecutionResult === "number" ? EXEC_NAMES[r.txExecutionResult] : undefined);
+  if (exec && EXEC_FAILURES.has(exec)) return { state: "reverted", detail: `execution ${exec}` };
+  if (r.resultName && RESULT_FAILURES.has(r.resultName)) return { state: "reverted", detail: `consensus ${r.resultName}` };
+  if (r.statusName && STATUS_FAILURES.has(r.statusName)) return { state: "reverted", detail: `status ${r.statusName}` };
+  if (exec === "FINISHED_WITH_RETURN") return { state: "success", detail: exec };
+  return { state: "unverified", detail: "execution result not reported by the receipt" };
+}
+
+// ---- strict numeric input ------------------------------------------------------
+export const MIN_COVERAGE_ATTO = 10n ** 15n;
+export const MIN_DEPOSIT_ATTO = 10n ** 15n;
+
+export type Parsed = { ok: true; value: bigint } | { ok: false; error: string };
+
+/**
+ * Parse a user-entered GEN amount. Rejects empty, negative, zero, scientific
+ * notation, signs and anything non-numeric. Nothing is "fixed up": -0.5 is an
+ * error, never 0.5.
+ */
+export function parseGen(input: string, minAtto: bigint = 1n): Parsed {
+  const t = input.trim();
+  if (t === "") return { ok: false, error: "Enter an amount" };
+  if (t.startsWith("-")) return { ok: false, error: "Amount cannot be negative" };
+  if (!/^\d+(\.\d{1,18})?$/.test(t)) return { ok: false, error: "Use digits and at most one decimal point" };
+  const v = toAtto(t);
+  if (v <= 0n) return { ok: false, error: "Amount must be greater than zero" };
+  if (v < minAtto) return { ok: false, error: `Minimum is ${fromAtto(minAtto, 4)}` };
+  return { ok: true, value: v };
+}
+
+// ---- user notices ----------------------------------------------------------------
+export interface Notice {
+  tone: "ok" | "warn" | "error";
+  text: string;
+}
+
+export function noticeFromWrite(label: string, r: WriteResult): Notice {
+  const ref = `${r.hash.slice(0, 12)}…`;
+  if (r.verified) return { tone: "ok", text: `${label} · executed · ${ref}` };
+  return {
+    tone: "warn",
+    text: `${label} · ${r.status}, but the execution result was not reported. Do not assume success. Check ${ref} on the explorer.`,
+  };
+}
+
+export function noticeFromError(e: unknown): Notice {
+  if (e instanceof TxRevertedError) {
+    return { tone: "error", text: `${e.message} (${e.hash.slice(0, 12)}…)` };
+  }
+  const x = e as { shortMessage?: string; message?: string };
+  return { tone: "error", text: x?.shortMessage ?? x?.message ?? "Transaction failed" };
+}
+
+export const NOTICE_CLASS: Record<Notice["tone"], string> = {
+  ok: "text-sprout",
+  warn: "text-wheat",
+  error: "text-rust",
+};
 
 export async function writeCall(
   account: string,
@@ -262,8 +367,14 @@ export async function writeCall(
     hash,
     waitUntil: "decided",
     retries: 120,
-  })) as { statusName?: string; status?: string | number };
-  return { hash, status: String(receipt?.statusName ?? receipt?.status ?? "SUBMITTED") };
+  })) as ReceiptLike & { status?: string | number };
+  const verdict = assessReceipt(receipt);
+  if (verdict.state === "reverted") throw new TxRevertedError(verdict.detail, hash);
+  return {
+    hash,
+    status: String(receipt?.statusName ?? receipt?.status ?? "SUBMITTED"),
+    verified: verdict.state === "success",
+  };
 }
 
 // ---- typed views -------------------------------------------------------------

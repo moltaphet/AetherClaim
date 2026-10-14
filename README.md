@@ -396,5 +396,23 @@ official `genlayer-js` client. Before each write the fee deposit comes from
 never a zero deposit) and the gas limit from `estimateTransactionGas`; nothing
 is hardcoded. MetaMask may still show its own EVM simulation warning on Studio
 Next, which is independent of GenLayer protocol fees. Reads race the two RPCs
-under a 5s limit and fall back to the genesis registry. Wallet-side behaviour
-was not exercised against a live MetaMask in this build.
+under a 5s limit and fall back to the genesis registry, and balances or counts
+are never rendered as zero when a read failed (a sync alert shows instead).
+Wallet-side behaviour was not exercised against a live MetaMask in this build.
+
+Transaction checks: `ACCEPTED` is not treated as success. The receipt's execution
+result must be `FINISHED_WITH_RETURN`. A raised contract or a consensus
+disagreement shows "Transaction Reverted on-chain". A receipt that reports no
+execution result shows a warning, never a success. Amount inputs reject empty,
+zero, negative, signed, scientific and non-numeric entries before any
+transaction is built. Weather fetches use a 6 s abort timeout, and a station
+that returns a null, missing or negative day is marked `DATA_ERROR` and excluded
+from the quorum view rather than read as 0 mm.
+
+**Dependency audit.** `npm audit` reports 9 findings (1 critical, 6 high, 2
+moderate) in `next` 14.2.35, `postcss` and `tailwindcss`. `npm audit fix` changes
+nothing: every remaining fix is a breaking major upgrade (Next 16, Tailwind 4),
+which was not applied unreviewed. The app is client-rendered and uses no
+`next/image`, middleware, rewrites or CSP nonces, and the image optimizer is
+disabled in `next.config.mjs`. For a production deployment, serve it as a static
+export or upgrade Next.js.

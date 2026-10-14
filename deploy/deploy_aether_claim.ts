@@ -34,6 +34,9 @@ const SEED_LIQUIDITY = 500_000_000_000_000_000n; // 0.5 GEN underwriter seed
 interface Receipt {
   status?: number | string;
   statusName?: string;
+  resultName?: string;
+  txExecutionResult?: number;
+  txExecutionResultName?: string;
   data?: { contract_address?: string };
   txDataDecoded?: { contractAddress?: string };
 }
@@ -62,9 +65,35 @@ interface Client {
   }): Promise<Receipt>;
 }
 
-function ok(r: Receipt): boolean {
+const EXEC_NAMES = [
+  "NOT_VOTED",
+  "FINISHED_WITH_RETURN",
+  "FINISHED_WITH_ERROR",
+  "TIMEOUT",
+  "NONDET_DISAGREE",
+  "DETERMINISTIC_VIOLATION",
+];
+
+export type Outcome = "success" | "failed" | "unverified";
+
+/**
+ * ACCEPTED is not success: a transaction whose execution raised is still
+ * accepted. Three outcomes, so a live deploy is never lost to an uncertain read:
+ *   failed     not accepted, an execution error, or a consensus disagreement.
+ *   success    accepted AND the receipt reports FINISHED_WITH_RETURN.
+ *   unverified accepted, but the receipt does not report an execution result.
+ * Only `failed` aborts. `unverified` is warned about and recorded as such.
+ */
+export function assessReceipt(r: Receipt): Outcome {
   const n = Number(r.status);
-  return n === 5 || n === 7 || r.statusName === "ACCEPTED" || r.statusName === "FINALIZED";
+  const accepted = n === 5 || n === 7 || r.statusName === "ACCEPTED" || r.statusName === "FINISHED";
+  if (!accepted) return "failed";
+  const exec =
+    r.txExecutionResultName ?? (typeof r.txExecutionResult === "number" ? EXEC_NAMES[r.txExecutionResult] : undefined);
+  const bad = ["DISAGREE", "TIMEOUT", "DETERMINISTIC_VIOLATION", "NO_MAJORITY", "MAJORITY_DISAGREE", "MAJORITY_TIMEOUT"];
+  if (r.resultName && bad.includes(r.resultName)) return "failed";
+  if (exec && exec !== "FINISHED_WITH_RETURN") return "failed";
+  return exec === "FINISHED_WITH_RETURN" ? "success" : "unverified";
 }
 
 function addressFrom(r: Receipt): string | undefined {
@@ -86,7 +115,11 @@ export default async function main(client: Client): Promise<string> {
 
   const hash = await client.deployContract({ code, args: [MAX_EPOCH_EXPOSURE], fees });
   const receipt = await client.waitForTransactionReceipt({ hash, waitUntil: "decided", retries: RETRIES });
-  if (!ok(receipt)) throw new Error(`Deployment failed: ${JSON.stringify(receipt, jsonSafe)}`);
+  const deployOutcome = assessReceipt(receipt);
+  if (deployOutcome === "failed") throw new Error(`Deployment failed: ${JSON.stringify(receipt, jsonSafe)}`);
+  if (deployOutcome === "unverified") {
+    console.warn("WARNING: deploy receipt did not report an execution result. Verify the contract on the explorer.");
+  }
   const address = addressFrom(receipt);
   if (!address) throw new Error(`No contract address in receipt: ${JSON.stringify(receipt, jsonSafe)}`);
   console.log(`AetherClaim deployed at ${address}`);
@@ -102,6 +135,7 @@ export default async function main(client: Client): Promise<string> {
         rpc: "https://studio-next.genlayer.com/api",
         address,
         deployTx: hash,
+        deployExecutionVerified: deployOutcome === "success",
         deployedAt: new Date().toISOString(),
       },
       jsonSafe,
@@ -134,13 +168,20 @@ export default async function main(client: Client): Promise<string> {
       fees,
     });
     const seed = await client.waitForTransactionReceipt({ hash: seedHash, waitUntil: "decided", retries: RETRIES });
-    console.log(`Liquidity seed ${ok(seed) ? "accepted" : "NOT accepted"} (${seedHash})`);
-    if (ok(seed)) {
+    const seedOutcome = assessReceipt(seed);
+    console.log(
+      `Liquidity seed ${seedOutcome === "success" ? "executed" : seedOutcome === "unverified" ? "accepted, execution NOT verified" : "FAILED"} (${seedHash})`,
+    );
+    if (seedOutcome !== "failed") {
       // Record the seed alongside the deploy so the file is complete on its own.
       const record = JSON.parse(readFileSync(path.resolve(process.cwd(), DEPLOYMENT_PATH), "utf8"));
       writeFileSync(
         path.resolve(process.cwd(), DEPLOYMENT_PATH),
-        JSON.stringify({ ...record, seedLiquidityTx: seedHash }, jsonSafe, 2),
+        JSON.stringify(
+          { ...record, seedLiquidityTx: seedHash, seedExecutionVerified: seedOutcome === "success" },
+          jsonSafe,
+          2,
+        ),
       );
     }
   } catch (e) {

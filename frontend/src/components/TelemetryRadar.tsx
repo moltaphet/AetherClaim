@@ -2,13 +2,22 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, GENESIS_PLOTS, MIN_INSURABLE_BASELINE_MM, Plot, tierForDeficit, TIERS, windowBaselineMm } from "@/lib/contract";
 
+type Status = "idle" | "ok" | "offline" | "data_error";
+
 interface Reading {
   name: string;
-  status: "idle" | "ok" | "fail";
+  status: Status;
   ms?: number;
   windowMm?: number[];
   tier?: number;
+  note?: string;
 }
+
+/** Hard ceiling for every third-party weather request. */
+const FETCH_TIMEOUT_MS = 6000;
+
+/** The station answered, but the payload is unusable. Not the same as offline. */
+class DataError extends Error {}
 
 const iso = (d: Date) => d.toISOString().slice(0, 10);
 const cmp = (d: Date) => iso(d).replaceAll("-", "");
@@ -23,27 +32,47 @@ function span() {
   return { start, end };
 }
 
-function windowsFrom(days: { date: string; mm: number }[], start: Date) {
+/**
+ * Sum the 28 days into two windows, in tenths of a millimetre, rounding per day
+ * the way the contract does. Every day must be present and be a finite,
+ * non-negative number. A missing, null, NaN, negative or non-numeric day makes
+ * the whole station a DataError. It is never coerced to 0, because 0 mm reads as
+ * a catastrophic drought.
+ */
+function strictWindows(byDate: Map<string, unknown>, start: Date): number[] {
   const out = [0, 0];
-  const t0 = start.getTime();
-  for (const d of days) {
-    const idx = Math.floor((new Date(d.date + "T00:00:00Z").getTime() - t0) / 86400000);
-    if (idx >= 0 && idx < 28) out[idx < 14 ? 0 : 1] += d.mm;
+  for (let i = 0; i < 28; i++) {
+    const d = new Date(start.getTime() + i * 86400000);
+    const key = iso(d);
+    const v = byDate.get(key);
+    if (typeof v !== "number" || !Number.isFinite(v) || v < 0) {
+      throw new DataError(`${key}: ${v === undefined ? "missing" : v === null ? "null" : `invalid (${String(v)})`}`);
+    }
+    out[i < 14 ? 0 : 1] += Math.round(v * 10);
   }
   return out;
 }
 
-async function timed<T>(fn: () => Promise<T>): Promise<{ v: T; ms: number }> {
-  const t = performance.now();
+async function fetchJson(url: string): Promise<{ json: any; ms: number }> {
   const ctl = new AbortController();
-  const to = setTimeout(() => ctl.abort(), 9000);
+  const timer = setTimeout(() => ctl.abort(), FETCH_TIMEOUT_MS);
+  const t0 = performance.now();
   try {
-    const v = await fn();
-    return { v, ms: Math.round(performance.now() - t) };
+    const r = await fetch(url, { signal: ctl.signal });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const json = await r.json();
+    return { json, ms: Math.round(performance.now() - t0) };
   } finally {
-    clearTimeout(to);
+    clearTimeout(timer);
   }
 }
+
+const label: Record<Status, string> = {
+  idle: "waiting",
+  ok: "ok",
+  offline: "OFFLINE",
+  data_error: "DATA_ERROR",
+};
 
 export default function TelemetryRadar({ plotId }: { plotId: string | null }) {
   const [plot, setPlot] = useState<Plot | null>(GENESIS_PLOTS[0]);
@@ -72,46 +101,53 @@ export default function TelemetryRadar({ plotId }: { plotId: string | null }) {
       return Math.round(windowBaselineMm(plot, mid.getUTCMonth() + 1) * 10);
     });
 
-    const toRow = (name: string, windows: number[], ms: number): Reading => {
-      const defs = windows.map((w, i) => {
-        const t = Math.round(w * 10);
+    const toRow = (name: string, windowsTenths: number[], ms: number): Reading => {
+      const defs = windowsTenths.map((t, i) => {
         const b = baseTenths[i];
         // Micro-baseline floor: an arid window reads 0% (same rule as the contract).
         if (b < MIN_INSURABLE_BASELINE_MM * 10) return 0;
         return t >= b ? 0 : Math.floor(((b - t) * 100) / b);
       });
-      return { name, status: "ok", ms, windowMm: windows, tier: tierForDeficit(Math.min(...defs)) };
+      return {
+        name,
+        status: "ok",
+        ms,
+        windowMm: windowsTenths.map((t) => t / 10),
+        tier: tierForDeficit(Math.min(...defs)),
+      };
     };
+
+    const classify = (name: string, e: unknown): Reading =>
+      e instanceof DataError
+        ? { name, status: "data_error", note: e.message }
+        : { name, status: "offline", note: e instanceof Error && e.name === "AbortError" ? "timed out after 6s" : "no response" };
+
     const omFetch = async (name: string, url: string): Promise<Reading> => {
       try {
-        const { v, ms } = await timed(async () => {
-          const r = await fetch(url);
-          if (!r.ok) throw new Error(String(r.status));
-          return r.json();
-        });
-        const days = (v.daily.time as string[]).map((date, i) => ({ date, mm: v.daily.precipitation_sum[i] ?? 0 }));
-        return toRow(name, windowsFrom(days, start), ms);
-      } catch {
-        return { name, status: "fail" };
+        const { json, ms } = await fetchJson(url);
+        const times = json?.daily?.time;
+        const vals = json?.daily?.precipitation_sum;
+        if (!Array.isArray(times) || !Array.isArray(vals)) throw new DataError("unexpected response shape");
+        const byDate = new Map<string, unknown>(times.map((t: string, i: number) => [t, vals[i]]));
+        return toRow(name, strictWindows(byDate, start), ms);
+      } catch (e) {
+        return classify(name, e);
       }
     };
     const nasa = async (): Promise<Reading> => {
       const name = "NASA POWER";
       try {
-        const { v, ms } = await timed(async () => {
-          const u = `https://power.larc.nasa.gov/api/temporal/daily/point?parameters=PRECTOTCORR&community=AG&longitude=${lon}&latitude=${lat}&start=${cmp(start)}&end=${cmp(end)}&format=JSON`;
-          const r = await fetch(u);
-          if (!r.ok) throw new Error(String(r.status));
-          return r.json();
-        });
-        const series = v.properties.parameter.PRECTOTCORR as Record<string, number>;
-        const days = Object.entries(series).map(([k, mm]) => ({
-          date: `${k.slice(0, 4)}-${k.slice(4, 6)}-${k.slice(6, 8)}`,
-          mm: mm < 0 ? 0 : mm,
-        }));
-        return toRow(name, windowsFrom(days, start), ms);
-      } catch {
-        return { name, status: "fail" };
+        const u = `https://power.larc.nasa.gov/api/temporal/daily/point?parameters=PRECTOTCORR&community=AG&longitude=${lon}&latitude=${lat}&start=${cmp(start)}&end=${cmp(end)}&format=JSON`;
+        const { json, ms } = await fetchJson(u);
+        const series = json?.properties?.parameter?.PRECTOTCORR;
+        if (!series || typeof series !== "object") throw new DataError("unexpected response shape");
+        // NASA POWER marks a missing day as -999. strictWindows rejects it.
+        const byDate = new Map<string, unknown>(
+          Object.entries(series as Record<string, unknown>).map(([k, v]) => [`${k.slice(0, 4)}-${k.slice(4, 6)}-${k.slice(6, 8)}`, v]),
+        );
+        return toRow(name, strictWindows(byDate, start), ms);
+      } catch (e) {
+        return classify(name, e);
       }
     };
     const results = await Promise.all([
@@ -127,7 +163,9 @@ export default function TelemetryRadar({ plotId }: { plotId: string | null }) {
     scan();
   }, [scan]);
 
+  // Only stations with a complete, valid reading take part in the consensus view.
   const valid = rows.filter((r) => r.status === "ok");
+  const excluded = rows.filter((r) => r.status === "offline" || r.status === "data_error");
   // Same aggregation as the contract: median of three answering sources, or the
   // lower of two. Fewer than two is a quorum failure, which allows a retry.
   const sorted = valid.map((r) => r.tier!).sort((a, b) => a - b);
@@ -154,24 +192,41 @@ export default function TelemetryRadar({ plotId }: { plotId: string | null }) {
           {rows.map((r) => (
             <div key={r.name} className="flex items-center gap-4 rounded-lg border border-line bg-loam p-3">
               <span
-                className={`h-2.5 w-2.5 rounded-full ${r.status === "ok" ? "bg-sprout" : r.status === "fail" ? "bg-rust" : "animate-pulse bg-mist"}`}
+                className={`h-2.5 w-2.5 rounded-full ${
+                  r.status === "ok"
+                    ? "bg-sprout"
+                    : r.status === "offline"
+                      ? "bg-rust"
+                      : r.status === "data_error"
+                        ? "bg-wheat"
+                        : "animate-pulse bg-mist"
+                }`}
               />
               <div className="flex-1">
                 <div className="text-sm">{r.name}</div>
                 <div className="font-mono text-[11px] text-mist">
                   {r.status === "ok"
                     ? `windows ${r.windowMm!.map((w) => w.toFixed(1)).join(" / ")} mm · ${r.ms} ms`
-                    : r.status === "fail"
-                      ? "no valid response"
-                      : "waiting"}
+                    : r.status === "idle"
+                      ? "waiting"
+                      : `${label[r.status]} · ${r.note ?? ""} · excluded from consensus`}
                 </div>
               </div>
               {r.status === "ok" && (
                 <span className={`font-mono text-xs ${TIERS[r.tier!].color}`}>TIER {r.tier}</span>
               )}
+              {(r.status === "offline" || r.status === "data_error") && (
+                <span className={`font-mono text-xs ${r.status === "offline" ? "text-rust" : "text-wheat"}`}>{label[r.status]}</span>
+              )}
             </div>
           ))}
         </div>
+        {excluded.length > 0 && (
+          <p className="mt-3 text-xs text-mist">
+            {excluded.length} station{excluded.length > 1 ? "s" : ""} excluded. An unusable reading is never treated as
+            0 mm, which would falsely read as a catastrophic drought.
+          </p>
+        )}
       </div>
 
       <div className="card flex flex-col justify-between p-5">
@@ -196,7 +251,7 @@ export default function TelemetryRadar({ plotId }: { plotId: string | null }) {
           </div>
         </div>
         <ul className="mt-6 space-y-1 text-xs text-mist">
-          <li>≥ 2 sources must answer HTTP 200, else QUORUM_FAILURE (retry)</li>
+          <li>≥ 2 sources must answer HTTP 200 with every day valid, else QUORUM_FAILURE (retry)</li>
           <li>Three answer: median tier, any caller may settle. Two answer: lower tier, only the policyholder may accept</li>
           <li>A split never pays zero. One faulty station cannot erase a claim two sources support</li>
           <li>Each source uses the lower of its two windows (sustained deviation)</li>

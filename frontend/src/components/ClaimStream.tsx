@@ -1,16 +1,34 @@
 "use client";
 import { useCallback, useEffect, useState } from "react";
-import { api, Claim, EXPIRY_GRACE_DAYS, fromAtto, outcomeNote, Policy, TIERS, writeCall } from "@/lib/contract";
+import {
+  api,
+  Claim,
+  EXPIRY_GRACE_DAYS,
+  fromAtto,
+  Notice,
+  NOTICE_CLASS,
+  noticeFromError,
+  noticeFromWrite,
+  outcomeNote,
+  Policy,
+  TIERS,
+  writeCall,
+} from "@/lib/contract";
 import { useWallet } from "@/lib/useAether";
+import SyncAlert from "./SyncAlert";
 import SyncBadge from "./SyncBadge";
 import WalletSimNote from "./WalletSimNote";
 
 export default function ClaimStream({ refreshKey }: { refreshKey: number }) {
   const { account, chainOk, connect } = useWallet();
-  const [rows, setRows] = useState<{ policy: Policy; claim: Claim | null }[]>([]);
+  const [rows, setRows] = useState<{ policy: Policy; claim: Claim | null; claimLive: boolean }[]>([]);
   const [loading, setLoading] = useState(false);
+  // false means the last policy read failed. Rows keep their last known value
+  // rather than being replaced by an empty list that would read as "no policies".
+  const [live, setLive] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
-  const [msg, setMsg] = useState<string | null>(null);
+  const [notice, setNotice] = useState<Notice | null>(null);
+  const [refetched, setRefetched] = useState<Record<string, boolean>>({});
   const [now, setNow] = useState(Math.floor(Date.now() / 1000));
 
   useEffect(() => {
@@ -23,17 +41,24 @@ export default function ClaimStream({ refreshKey }: { refreshKey: number }) {
     setLoading(true);
     try {
       const pr = await api.policies(account);
-      if (!pr.live) setMsg(null);
-      const policies = pr.data;
+      setLive(pr.live);
+      if (!pr.live) return; // keep the last known rows, show the sync alert
       const withClaims = await Promise.all(
-        policies.map(async (policy) => {
-          const c = (await api.claim(policy.policy_id)).data as Claim;
-          return { policy, claim: c && "outcome" in c ? c : null };
+        pr.data.map(async (policy) => {
+          const cr = await api.claim(policy.policy_id);
+          const c = cr.data as Claim;
+          return { policy, claim: cr.live && c && "outcome" in c ? c : null, claimLive: cr.live };
         }),
       );
       setRows(withClaims);
-    } catch (e: any) {
-      setMsg(e.message);
+      // Claims already past their cooldown at load time need no extra refetch.
+      const nowSec = Math.floor(Date.now() / 1000);
+      const passed = withClaims.filter(
+        ({ claim }) => claim && claim.cooldown_until > 0 && nowSec >= claim.cooldown_until,
+      );
+      setRefetched((r) => ({ ...r, ...Object.fromEntries(passed.map((d) => [d.policy.policy_id, true])) }));
+    } catch {
+      setLive(false);
     } finally {
       setLoading(false);
     }
@@ -46,17 +71,33 @@ export default function ClaimStream({ refreshKey }: { refreshKey: number }) {
   const act = async (fn: string, id: string) => {
     if (!account) return connect();
     setBusy(id + fn);
-    setMsg(null);
+    setNotice(null);
     try {
       const r = await writeCall(account, fn, [id]);
-      setMsg(`${fn} · ${r.status} · ${r.hash.slice(0, 12)}…`);
+      setNotice(noticeFromWrite(fn, r));
       await load();
-    } catch (e: any) {
-      setMsg(e?.shortMessage ?? e?.message ?? "Transaction failed");
+    } catch (e) {
+      setNotice(noticeFromError(e));
     } finally {
       setBusy(null);
     }
   };
+
+  // When a cooldown reaches zero, re-read the chain once so the release action
+  // reflects authoritative claimable state without a page refresh.
+  useEffect(() => {
+    const due = rows.filter(
+      ({ claim, policy }) =>
+        claim &&
+        BigInt(claim.approved_payout) > 0n &&
+        claim.cooldown_until > 0 &&
+        now >= claim.cooldown_until &&
+        !refetched[policy.policy_id],
+    );
+    if (due.length === 0) return;
+    setRefetched((r) => ({ ...r, ...Object.fromEntries(due.map((d) => [d.policy.policy_id, true])) }));
+    load();
+  }, [now, rows, refetched, load]);
 
   if (!account)
     return (
@@ -70,13 +111,14 @@ export default function ClaimStream({ refreshKey }: { refreshKey: number }) {
 
   return (
     <section className="space-y-5">
-      {msg && <div className="card px-4 py-3 font-mono text-xs text-wheat">{msg}</div>}
+      {notice && <div className={`card px-4 py-3 font-mono text-xs ${NOTICE_CLASS[notice.tone]}`}>{notice.text}</div>}
       <div className="flex justify-end"><SyncBadge /></div>
-      {loading && rows.length === 0 && <p className="text-sm text-mist">Querying chain (5s limit)…</p>}
-      {!loading && rows.length === 0 && (
+      {!live && <SyncAlert what="Your policy list" />}
+      {loading && rows.length === 0 && live && <p className="text-sm text-mist">Querying chain (5s limit)…</p>}
+      {!loading && live && rows.length === 0 && (
         <div className="card p-8 text-center text-mist">No policies for this account yet. Buy one in the Underwriting Desk.</div>
       )}
-      {rows.map(({ policy, claim }) => {
+      {rows.map(({ policy, claim, claimLive }) => {
         const approved = claim ? BigInt(claim.approved_payout) : 0n;
         const vested = claim ? BigInt(claim.vested_amount) : 0n;
         const cooldown = claim && approved > 0n ? claim.cooldown_until - now : 0;
@@ -85,6 +127,12 @@ export default function ClaimStream({ refreshKey }: { refreshKey: number }) {
             ? Math.min(1, (now - claim.cooldown_until) / (claim.vesting_end - claim.cooldown_until))
             : 0;
         const releasedPct = approved > 0n ? Number((vested * 10000n) / approved) / 100 : 0;
+        // Releasable is recomputed from the clock so the button enables the moment
+        // the cooldown ends, not only after the next chain read. Same formula as the contract.
+        const VEST = 3 * 86400;
+        const elapsed = claim && approved > 0n ? Math.max(0, Math.min(now - claim.cooldown_until, VEST)) : 0;
+        const vestedNow = approved > 0n ? (approved * BigInt(elapsed)) / BigInt(VEST) : 0n;
+        const releasableNow = vestedNow > vested ? vestedNow - vested : 0n;
         return (
           <article key={policy.policy_id} className="card p-5">
             <header className="flex flex-wrap items-center justify-between gap-3">
@@ -97,6 +145,11 @@ export default function ClaimStream({ refreshKey }: { refreshKey: number }) {
               <span className="rounded-full border border-line px-3 py-1 font-mono text-xs">{policy.status}</span>
             </header>
 
+            {!claimLive && (
+              <p className="mt-3 font-mono text-[11px] text-wheat">
+                Claim data syncing… outcome and payout are not shown until the read succeeds.
+              </p>
+            )}
             {claim && (
               <div className="mt-4 grid gap-3 sm:grid-cols-4">
                 <Cell k="Outcome" v={claim.outcome} cls={claim.payout_tier > 0 ? TIERS[claim.payout_tier].color : ""} />
@@ -145,7 +198,16 @@ export default function ClaimStream({ refreshKey }: { refreshKey: number }) {
                 </button>
               )}
               {policy.status === "ACTIVE" && now > policy.end_ts + EXPIRY_GRACE_DAYS * 86400 && (
-                <span className="font-mono text-xs text-rust">evaluation window closed · reserve releases on expiry</span>
+                <>
+                  <span className="font-mono text-xs text-rust">evaluation window closed · reserve can now be released</span>
+                  <button
+                    className="btn"
+                    disabled={!!busy || !chainOk}
+                    onClick={() => act("expire_policy", policy.policy_id)}
+                  >
+                    {busy === policy.policy_id + "expire_policy" ? "Releasing…" : "Release Expired Capital"}
+                  </button>
+                </>
               )}
               {policy.status === "SETTLED_NO_PAYOUT" && (
                 <span className="font-mono text-xs text-mist">settled · no payout · final</span>
@@ -153,10 +215,10 @@ export default function ClaimStream({ refreshKey }: { refreshKey: number }) {
               {approved > 0n && (
                 <button
                   className="btn btn-solid"
-                  disabled={!!busy || !chainOk || cooldown > 0 || BigInt(claim!.releasable) === 0n}
+                  disabled={!!busy || !chainOk || cooldown > 0 || releasableNow === 0n}
                   onClick={() => act("release_payout", policy.policy_id)}
                 >
-                  Release {claim ? fromAtto(claim.releasable, 4) : "0"} GEN
+                  Release {fromAtto(releasableNow, 4)} GEN
                 </button>
               )}
               <WalletSimNote />
