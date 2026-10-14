@@ -9,8 +9,15 @@ observed rainfall.
 |---|---|
 | Network | GenLayer Studio Next, chain `61997` |
 | RPC | `https://studio-next.genlayer.com/api` (fallback `studio-dev.genlayer.com/api`) |
-| Contract | `0x520928106203cb618A92841B1fD0A69978fE6Dc5` |
+| **Contract (canonical)** | **`0x520928106203cb618A92841B1fD0A69978fE6Dc5`** |
 | Explorer | https://explorer-studio-next.genlayer.com/address/0x520928106203cb618A92841B1fD0A69978fE6Dc5 |
+| Deploy transaction | `0x68722d339d57fbba616b92bb81a26023dd095811575f11ce35b842246a14e0a4` (a transaction hash, not an address) |
+| Liquidity seed transaction | `0x7cf0d675c740a59bf9626d32747f6586cb2bdb3ba0ab8cda63e037306e39d89b` (a transaction hash, not an address) |
+
+This is the only active deployment. Earlier iterations of this contract were
+deployed to other Studio Next addresses during development. They are
+**superseded and deprecated**, are not recorded here on purpose, and must not be
+used. `deployments/studio-next.json` always holds the canonical record.
 
 > **Deployment status (honest note).** This is the **round-8** build: validators
 > compare `tier` and `source_count` exactly and allow ±5 points of noise on
@@ -101,6 +108,15 @@ Examples, with per-source tiers listed:
 | 3 / 1 / 1 | median 1 | 30% |
 | 3 / outage / 1 | lower of 3, 1 = 1 (policyholder only) | 30% |
 | 3 / 0 / outage | lower of 3, 0 = 0 (policyholder only) | 0%. See the limitation in §2 |
+
+> **Infrastructure Note on Quorum:** Both Open-Meteo ERA5 and GFS endpoints share
+> the same underlying hosting infrastructure. In this testnet deployment they
+> provide independent re-analysis vs forecast datasets, but represent a correlated
+> hosting dependency. For mainnet production, the source list should be extended
+> with direct enterprise gateways (for example dedicated NOAA enterprise feeds or
+> ECMWF APIs) to achieve full infrastructure diversification. None of these are
+> integrated yet. The endpoints are built inside the contract, so changing them
+> means a new deployment.
 
 **Infrastructure corroboration disclosure.** Both the Open-Meteo ERA5 leg and
 the Open-Meteo GFS leg originate from the same underlying hosting infrastructure.
