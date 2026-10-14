@@ -245,6 +245,63 @@ class TestAdversarialProtection:
         # Determinism: a validator that re-reads the same sources agrees.
         assert env.vm.run_validator() is True
 
+    def test_third_party_cannot_force_lower_tier_settlement_on_outage(self, env):
+        """Audit PoC (commit 4e3a10b). GFS is down; ERA5 reads Tier 1 and NASA
+        Tier 3. A third party calls evaluate_claim. It must NOT lock the insured
+        into min = Tier 1. The call is a QUORUM_FAILURE that writes no state, and
+        when GFS returns the insured still settles at the Tier 3 median."""
+        pid = buy(env.c, env.vm, env.farmer)
+        warp_to(env.vm, MATURITY + timedelta(hours=3))
+        mock_sources(env.vm, (TIER1, TIER1), gfs=None, nasa=(TIER3, TIER3))
+        env.vm.sender = env.lp  # a third party, not the policyholder
+        res = env.c.evaluate_claim(pid)
+        assert res["outcome"] == "QUORUM_FAILURE" and res["source_count"] == 2
+        assert env.c.get_policy(pid)["status"] == "ACTIVE"
+        assert env.c.get_claim(pid) == {}  # nothing written: no lock, no used retry slot
+        # Repeated griefing never consumes the policyholder's retry.
+        env.vm.sender = env.admin
+        assert env.c.evaluate_claim(pid)["outcome"] == "QUORUM_FAILURE"
+        # GFS recovers. All three answer: ERA5 Tier 1, GFS Tier 3, NASA Tier 3.
+        mock_sources(env.vm, (TIER1, TIER1), gfs=(TIER3, TIER3), nasa=(TIER3, TIER3))
+        env.vm.sender = env.farmer
+        claim = env.c.evaluate_claim(pid)  # no "too recently": nothing was recorded
+        assert claim["payout_tier"] == 3 and int(claim["approved_payout"]) == 10 * ATTO
+
+    def test_three_sources_settle_permissionlessly_at_median(self, env):
+        """With all three answering, any caller may settle, at the median."""
+        pid = buy(env.c, env.vm, env.farmer)
+        warp_to(env.vm, MATURITY + timedelta(hours=3))
+        mock_sources(env.vm, (TIER1, TIER1), gfs=(TIER3, TIER3), nasa=(TIER3, TIER3))
+        env.vm.sender = env.lp  # third party
+        claim = env.c.evaluate_claim(pid)
+        assert claim["payout_tier"] == 3 and claim["source_count"] == 3
+        pol = env.c.get_policy(pid)
+        assert pol["status"] == "SETTLED_PAYOUT" and pol["claimed"] is True
+        assert pol["policyholder"] == _hex(env, env.farmer)  # payout still belongs to the insured
+
+    def test_policyholder_can_voluntarily_accept_degraded_two_source_settlement(self, env):
+        """The insured may choose the conservative lower tier with two sources."""
+        pid = buy(env.c, env.vm, env.farmer)
+        warp_to(env.vm, MATURITY + timedelta(hours=3))
+        mock_sources(env.vm, (TIER1, TIER1), gfs=None, nasa=(TIER3, TIER3))
+        env.vm.sender = env.farmer
+        claim = env.c.evaluate_claim(pid)
+        assert claim["payout_tier"] == 1 and claim["source_count"] == 2
+        assert int(claim["approved_payout"]) == 3 * ATTO
+        assert env.c.get_policy(pid)["status"] == "SETTLED_PAYOUT"
+
+    def test_third_party_outage_attempt_does_not_block_policyholder_retry(self, env):
+        """With fewer than two sources, a third party's call also writes nothing."""
+        pid = buy(env.c, env.vm, env.farmer)
+        warp_to(env.vm, MATURITY + timedelta(hours=3))
+        mock_sources(env.vm, (TIER3, TIER3), gfs=None, nasa=None)
+        env.vm.sender = env.lp
+        assert env.c.evaluate_claim(pid)["outcome"] == "QUORUM_FAILURE"
+        assert env.c.get_claim(pid) == {}
+        uniform(env.vm, TIER3)
+        env.vm.sender = env.farmer
+        assert env.c.evaluate_claim(pid)["payout_tier"] == 3
+
     def test_three_source_split_settles_at_median(self, env):
         """All three answer: Tier 3, Tier 1, Tier 1. The median is Tier 1."""
         pid = buy(env.c, env.vm, env.farmer)

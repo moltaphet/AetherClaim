@@ -9,12 +9,12 @@ observed rainfall.
 |---|---|
 | Network | GenLayer Studio Next, chain `61997` |
 | RPC | `https://studio-next.genlayer.com/api` (fallback `studio-dev.genlayer.com/api`) |
-| Contract | `0x5bbb679430b88BA07aC7bcF898Dc39d1dc70C2a8` |
-| Explorer | https://explorer-studio-next.genlayer.com/address/0x5bbb679430b88BA07aC7bcF898Dc39d1dc70C2a8 |
+| Contract | `0xfCFC35A4eedc8258e72c65877F5d66bc5Ac3C419` |
+| Explorer | https://explorer-studio-next.genlayer.com/address/0xfCFC35A4eedc8258e72c65877F5d66bc5Ac3C419 |
 
-> **Deployment status (honest note).** This is the **round-5** build: conservative
-> lower-bound settlement on source divergence, and no post-attempt retry hold. It
-> is deployed to Studio Next with the 0.5 GEN liquidity seed accepted
+> **Deployment status (honest note).** This is the **round-6** build: two-source
+> degraded settlement is restricted to the policyholder, and a third party's
+> degraded call writes no state. It is deployed to Studio Next with the 0.5 GEN liquidity seed accepted
 > (`deployments/studio-next.json`). The served schema matches
 > `deployments/aether_claim_abi.json` (19 methods, identical name set). Studio's
 > `gen_call` read endpoint has been failing server-side (`Can't reconnect until
@@ -64,18 +64,34 @@ observed rainfall.
 - **Per source.** Each source's tier is the lower of its two window tiers. A
   one-window anomaly therefore pays nothing.
 
-### 1b. Source aggregation (conservative lower-bound settlement)
+### 1b. Source aggregation and who may settle
 
-| Answering sources | Result | Settles at |
+| Answering sources | Who may settle | Settles at |
 |---|---|---|
-| 0 or 1 | `QUORUM_FAILURE` | nothing yet. Retry permitted until grace ends |
-| 2 | settled | the **lower** of the two tiers |
-| 3 | settled | the **median** of the three tiers |
+| 0 or 1 | nobody | `QUORUM_FAILURE`. Retry permitted until grace ends |
+| 2 (degraded) | the **policyholder only** | the **lower** of the two tiers |
+| 2 (degraded) | anyone else | `QUORUM_FAILURE`. **No state is written** |
+| 3 (full quorum) | **any caller** | the **median** of the three tiers |
 
 A split never pays zero by default. It settles at the tier that at least two
-answering sources support. The payout is `coverage × tier payout`, and a tier of 0
-settles as `SETTLED_NO_PAYOUT`. Any tier above 0 settles as `SETTLED_PAYOUT` and
-enters the 24-hour cooldown and 3-day vesting.
+answering sources support. The payout is `coverage × tier payout`, paid to the
+policyholder, and a tier of 0 settles as `SETTLED_NO_PAYOUT`. Any tier above 0
+settles as `SETTLED_PAYOUT` and enters the 24-hour cooldown and 3-day vesting.
+
+**Why degraded settlement is policyholder-only.** A settlement is final. The
+degraded tier is never above the full three-source median, so if any caller could
+settle a two-source result, a third party (or a griefing LP) could call during a
+one-source outage and lock the insured into a lower tier, destroying their ability
+to retry once all three sources answer. In round 5 that was possible
+(`min(tier_a, tier_b)` was permissionless). Now the insured chooses: wait for the
+third source, or accept the lower tier now
+(`test_third_party_cannot_force_lower_tier_settlement_on_outage`,
+`test_policyholder_can_voluntarily_accept_degraded_two_source_settlement`).
+
+A third party's degraded or sub-quorum call also writes **nothing**, including the
+retry timestamp. Otherwise a griefer could keep the one-day retry rate limit
+occupied and front-run the insured's retries
+(`test_third_party_outage_attempt_does_not_block_policyholder_retry`).
 
 Examples, with per-source tiers listed:
 
@@ -83,8 +99,8 @@ Examples, with per-source tiers listed:
 |---|---|---|
 | 3 / 3 / 0 | median 3 | 100% |
 | 3 / 1 / 1 | median 1 | 30% |
-| 3 / outage / 1 | lower of 3, 1 = 1 | 30% |
-| 3 / 0 / outage | lower of 3, 0 = 0 | 0%. See the limitation in §2 |
+| 3 / outage / 1 | lower of 3, 1 = 1 (policyholder only) | 30% |
+| 3 / 0 / outage | lower of 3, 0 = 0 (policyholder only) | 0%. See the limitation in §2 |
 
 **Why the median and not the minimum of three.** The spec allowed "the
 conservative lower tier, or the median". The minimum of three is not safe here.
@@ -130,10 +146,11 @@ once: a settled outcome is final, and a second evaluation is refused.
 
 The remaining timing levers, and how far they go:
 
-- **Availability cannot raise the payout.** Because the aggregate is an order
-  statistic, dropping a source can only lower the settled tier. Retrying during
-  an outage therefore gains nothing. The exhaustive sweep proves this
-  (`test_availability_cannot_raise_payout`).
+- **Availability cannot raise the payout, and a degraded tier is never above the
+  full median.** The aggregate is an order statistic, so dropping a source can
+  only lower the settled tier. That is why waiting for the third source is weakly
+  better for the insured, and why only the insured may accept a degraded tier. The
+  exhaustive sweep proves the monotonicity (`test_availability_cannot_raise_payout`).
 - **Data revisions can still move a retry.** If a source revises a historical
   value during the grace period, a retry can read a different number. The
   contract does not pin data versions. Settled outcomes are final, so only a
@@ -173,24 +190,31 @@ is about how the realised payout tracks the risk the premium priced:
   least two answering sources reading that tier or higher. This was checked
   exhaustively, with 0 violations.
 - LPs are still protected. No single high-reading outlier can raise the payout,
-  and the lower-of-two rule is conservative when only two sources answer.
+  and the lower-of-two rule is conservative, though it is only reachable if the
+  policyholder accepts it.
 
 **Known limits.** Read these before relying on the product.
 
-1. **Two-source settlement can be wiped by one reading.** With only two sources
-   answering, the lower reading governs. A drought read by one source and a
-   normal reading from the other settles at zero.
-   `test_two_source_split_settles_at_lower_reading_even_if_zero` documents this.
-   The "no wipe-out" guarantee holds only when three sources answer. To close it
-   with two, the options are a mean, which can split a claim, or treating a
-   two-source split as a quorum failure. The second reopens the outage-retry
-   question, so it is a product choice.
+1. **Two-source settlement can be wiped by one reading, but only by the insured's
+   choice.** With two sources answering, the lower reading governs. A drought read
+   by one source and normal rain from the other settles at zero if the
+   policyholder accepts it (`test_two_source_split_settles_at_lower_reading_even_if_zero`).
+   The "no wipe-out" guarantee holds in full only when three sources answer. A
+   policyholder who waits is never worse off in tier terms.
 2. **Data revisions.** The contract assumes the historical values inside the fixed
    windows are stable through the grace period. A revised value can change a
    retry's result, for example by pulling a median toward a revised source.
    Settled outcomes are final, so the exposure is limited to retries after
    outages. Mitigations, none implemented: a keeper that evaluates at a fixed
    time, or pinning the source snapshot on-chain.
+   **ERA5 re-analysis.** The ERA5 leg is a reanalysis product. ECMWF publishes
+   preliminary data within days and may later replace it with the validated
+   dataset, typically weeks to months afterwards. A value read at maturity can
+   therefore differ slightly from a later read. The fixed maturity is the safest
+   anchor available: windows are fixed at purchase, evaluation opens at a known
+   instant, and the first settlement is final, so a later ECMWF revision cannot
+   reopen a settled policy. It also means a settled outcome rests on the
+   preliminary figure.
 3. **Shared operator (see §5).** Two of the three legs are Open-Meteo. They are
    not independent.
 4. **Admin ban binds one address, not a person.** An admin can still use a second
@@ -218,9 +242,10 @@ is about how the realised payout tracks the risk the premium priced:
 | 10 | Central Valley had Apr–Oct as its cycle, which is dormant and dry | Cycle set to **Nov–Mar** with Mediterranean winter baselines. Regression: `test_central_valley_winter_policy_insurable_and_settles`, `test_central_valley_summer_term_rejected`, `test_central_valley_purchase_calendar` |
 | 11 | A 14-day grace let third-party outages forfeit a valid claim | Grace raised to **30 days**. A quorum failure stays retryable until the grace ends. Regression: `test_quorum_failure_retry_then_settlement_is_final`, `test_evaluation_closes_after_grace`, `test_expire_releases_reserve_after_grace` |
 | 12 | A source disagreement wiped out the claim (`INCONCLUSIVE_DISAGREE`, 0%) | **Conservative lower-bound settlement.** Three answering sources settle at the median tier, two at the lower tier. Only fewer than two answering is a `QUORUM_FAILURE`. Regression: `test_source_disagreement_settles_at_conservative_lower_tier`, `test_three_source_split_settles_at_median`, `test_single_low_outlier_is_outvoted` |
-| 13 (round 5) | Retry-after-split could wait for the dissenting source to go down | Closed by monotonicity, not by blocking splits. The aggregate can only fall when a source drops, so the sweep proves availability gains nothing. Regression: `test_availability_cannot_raise_payout` (512 cases) |
+| 13 (round 5) | Retry-after-split could wait for the dissenting source to go down | Closed by monotonicity, not by blocking splits. The aggregate can only fall when a source drops, so availability can never raise a payout above the full median (the sweep covers 512 cases). Round 6 relies on this to make degraded settlement the insured's choice. Regression: `test_availability_cannot_raise_payout` (512 cases) |
 | 14 (round 5) | A 14-day hold after each outage retry extended lock-up with no benefit | Hold removed. Expiry releases once the grace period ends. Regression: `test_quorum_failure_retries_then_releases_at_grace_end`, `test_grace_and_aggregation_config` |
 | 15 (round 5) | Docstrings did not state the timing assumptions for quorum retries | `evaluate_claim` and `_corroborate` now state the assumptions: fixed windows, one final settlement, retry only on outage, monotone availability, and the data-stability assumption |
+| 16 (round 6) | Any caller could settle a two-source result at `min(a, b)` during a one-source outage, locking the insured into a lower tier and removing their retry | Two-source (degraded) settlement is **policyholder-only**. Others get `QUORUM_FAILURE` and no state is written, so they cannot lock a tier or consume the retry rate limit. Three-source settlement stays permissionless. Regression: `test_third_party_cannot_force_lower_tier_settlement_on_outage`, `test_three_sources_settle_permissionlessly_at_median`, `test_policyholder_can_voluntarily_accept_degraded_two_source_settlement`, `test_third_party_outage_attempt_does_not_block_policyholder_retry` |
 
 **Deliberate deviation from the plain ERC-4626 formula.** A withdrawal pays
 `min(shares × pool / total_shares, shares × (pool − reserved) / total_shares)`.
@@ -232,7 +257,7 @@ the leaver and the stayer end with identical value.
 ## 3. Verify
 
 ```bash
-# contract tests (62 direct-mode tests: lifecycle, adversarial, sweep, audit regressions)
+# contract tests (66 direct-mode tests: lifecycle, adversarial, sweep, audit regressions)
 python -m pytest tests/test_aether_claim.py -v   # needs genlayer-test (gltest); pins GENVM_VERSION in tests/conftest.py
 
 # deploy (CLI already configured with a funded account)
@@ -240,9 +265,9 @@ genlayer network set studio-next
 genlayer deploy              # runs deploy/deploy_aether_claim.ts
 
 # read checks (currently failing on Studio; see the deployment note)
-genlayer call 0x5bbb679430b88BA07aC7bcF898Dc39d1dc70C2a8 list_plots
-genlayer call 0x5bbb679430b88BA07aC7bcF898Dc39d1dc70C2a8 get_pool
-genlayer call 0x5bbb679430b88BA07aC7bcF898Dc39d1dc70C2a8 get_config
+genlayer call 0xfCFC35A4eedc8258e72c65877F5d66bc5Ac3C419 list_plots
+genlayer call 0xfCFC35A4eedc8258e72c65877F5d66bc5Ac3C419 get_pool
+genlayer call 0xfCFC35A4eedc8258e72c65877F5d66bc5Ac3C419 get_config
 
 # frontend
 cd frontend && npm install && npm run dev

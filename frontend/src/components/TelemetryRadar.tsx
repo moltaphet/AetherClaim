@@ -136,7 +136,7 @@ export default function TelemetryRadar({ plotId }: { plotId: string | null }) {
   const split = quorum && new Set(sorted).size > 1;
   const verdict = !quorum
     ? "QUORUM_FAILURE · retry permitted"
-    : `${valid.length === 3 ? "median of 3" : "lower of 2"} → ${TIERS[agreed!].label}${split ? " · sources split" : ""}`;
+    : `${valid.length === 3 ? "median of 3 (anyone may settle)" : "lower of 2 (policyholder only)"} → ${TIERS[agreed!].label}${split ? " · sources split" : ""}`;
 
   return (
     <section className="grid gap-6 lg:grid-cols-3">
@@ -197,7 +197,7 @@ export default function TelemetryRadar({ plotId }: { plotId: string | null }) {
         </div>
         <ul className="mt-6 space-y-1 text-xs text-mist">
           <li>≥ 2 sources must answer HTTP 200, else QUORUM_FAILURE (retry)</li>
-          <li>Three answer: settle at the median tier. Two answer: the lower tier</li>
+          <li>Three answer: median tier, any caller may settle. Two answer: lower tier, only the policyholder may accept</li>
           <li>A split never pays zero. One faulty station cannot erase a claim two sources support</li>
           <li>Each source uses the lower of its two windows (sustained deviation)</li>
         </ul>

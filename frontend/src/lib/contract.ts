@@ -4,7 +4,7 @@
 export const CHAIN_ID = 61997;
 export const CHAIN_ID_HEX = "0xf22d";
 export const CONTRACT_ADDRESS =
-  process.env.NEXT_PUBLIC_AETHER_CLAIM_ADDRESS ?? "0x5bbb679430b88BA07aC7bcF898Dc39d1dc70C2a8";
+  process.env.NEXT_PUBLIC_AETHER_CLAIM_ADDRESS ?? "0xfCFC35A4eedc8258e72c65877F5d66bc5Ac3C419";
 
 // Primary first, fallback second. Both serve chain 61997.
 export const RPC_URLS = [
@@ -418,8 +418,8 @@ export function nextInsurableStart(p: Plot, from = new Date(), maxDays = 400): D
  * lower of two.
  */
 export function outcomeNote(outcome: string, sourceCount: number): string {
-  if (outcome === "QUORUM_FAILURE") return "fewer than 2 sources answered · retry permitted until grace ends";
+  if (outcome === "QUORUM_FAILURE") return "too few sources, or a degraded 2-source reading not accepted · retry permitted until grace ends";
   if (outcome === "NORMAL") return "no drought · final, no payout";
-  const basis = sourceCount === 3 ? "median of 3 sources" : "conservative lower of 2 sources";
+  const basis = sourceCount === 3 ? "median of 3 sources" : "lower of 2 sources, accepted by the policyholder";
   return `${basis} · final`;
 }

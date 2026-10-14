@@ -127,8 +127,8 @@ export default function PolicyVault({ plotId, onChange }: { plotId: string | nul
         <p className="mt-4 text-xs text-mist">
           The verdict covers only the final 28 days of your term, fixed at purchase. Evaluation opens 6 days
           after the term ends and stays open for {EXPIRY_GRACE_DAYS} days, so an outage cannot forfeit a claim.
-          A settled outcome is final. Source disagreements settle at the median (three sources) or the lower
-          tier (two sources). There are no daily re-checks.
+          A settled outcome is final. Three sources settle at the median for any caller. With only two, a third
+          party cannot settle you at the lower tier; only you can accept it. There are no daily re-checks.
         </p>
       </div>
 

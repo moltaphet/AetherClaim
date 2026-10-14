@@ -15,11 +15,12 @@
 #      admin-curated registry (cadastral hash, baseline, crop cycle). The
 #      observation URLs are built INSIDE the contract from registry
 #      coordinates; no caller-supplied URL or coordinate ever reaches a fetch.
-#   2. Multi-source aggregation. Three independent sources. With all three
-#      answering, the settled tier is their MEDIAN. With two answering, it is the
-#      LOWER of the two. With fewer than two, the result is QUORUM_FAILURE and
-#      the policy stays open for a retry. A split never pays zero. It settles at
-#      the conservative tier that at least two answering sources support.
+#   2. Multi-source aggregation. Three sources. With all three answering, the
+#      settled tier is their MEDIAN, and ANY caller may settle. With exactly two
+#      answering (degraded mode), the settled tier is the LOWER of the two, but
+#      only the POLICYHOLDER may accept it. Anyone else gets QUORUM_FAILURE, so a
+#      third party cannot lock the insured into a lower tier during an outage.
+#      With fewer than two answering, the result is QUORUM_FAILURE for everyone.
 #   3. Sustained deviation. The tier is the MINIMUM across two consecutive
 #      observation windows, so a one-window anomaly pays nothing.
 #   4. Discrete payouts. Only 0 / 30 / 70 / 100 percent exist. Validators
@@ -34,10 +35,12 @@
 #      reserved capital is left without a shareholder.
 #   9. Worthless-policy guard. A term whose final window falls below the floor is
 #      refused at purchase, so no premium is taken for a policy that cannot pay.
-#  10. Availability cannot raise a payout. The aggregate is an order statistic:
-#      dropping a source can only lower the settled tier, never raise it. So
-#      retrying during an outage gains nothing (see _corroborate and the sweep
-#      test). Quorum failures are retryable until 30 days after term end.
+#  10. Degraded settlement is policyholder-only. The aggregate is an order
+#      statistic, so a degraded (two-source) tier is never above the full
+#      three-source median. That makes waiting weakly better for the insured, and
+#      lets them choose: wait for the third source, or accept the lower tier now.
+#      Third-party quorum failures write no state, so they cannot rate-limit the
+#      policyholder's retries. Retries are open until 30 days after term end.
 #   6. Cooldown + vesting + exposure caps. Approved payouts sit through a
 #      24h cooldown, then vest linearly over 3 days; per-epoch underwriting is
 #      capped and total liabilities may never exceed the pool.
@@ -376,7 +379,9 @@ def _corroborate(observations):
         answering sources support.
 
     Monotonicity: dropping a source can only lower the settled tier, never raise
-    it. Each source's tier is a non-decreasing function of its deficit, so the
+    it. A degraded two-source tier is therefore never above the full median, which
+    is why evaluate_claim lets only the policyholder accept it. Each source's tier
+    is a non-decreasing function of its deficit, so the
     k-th order statistic of the tiers is the tier of the k-th order statistic of
     the deficits. median_deficit is therefore the same order statistic and stays
     consistent with the settled tier. A min over all three would not be monotone:
@@ -854,13 +859,19 @@ class AetherClaim(gl.contract.Contract):
           * Windows are fixed at purchase. Evaluation opens at matures_at and
             closes at end_ts + EXPIRY_GRACE. The closing instant equals the
             opening instant of expiry, so the two cannot both be open.
-          * Only QUORUM_FAILURE leaves a policy ACTIVE. A retry is allowed at
-            most once per EVAL_MIN_GAP.
+          * Who may settle. With all three sources answering, any caller may
+            settle at the median. With exactly two answering, only the
+            policyholder may settle, at the lower tier. For anyone else the
+            result is QUORUM_FAILURE and NO state is written, so a third party
+            can neither lock a lower tier nor consume the policyholder's retry
+            rate limit.
+          * Only QUORUM_FAILURE leaves a policy ACTIVE. The policyholder's own
+            retries are allowed at most once per EVAL_MIN_GAP.
           * Every settled outcome (tier 0 or a payout) is final on first
             settlement. A second evaluation is refused.
-          * Availability cannot raise the outcome. Whichever subset of sources
-            answers, the settled tier is at most the all-three median (see
-            _corroborate). A retry can therefore never beat a full evaluation.
+          * A degraded tier is never above the full three-source median, so
+            waiting for the third source is weakly better for the insured. The
+            insured may still accept the degraded tier to settle sooner.
           * Data stability. The contract assumes the historical values inside the
             fixed windows do not change during the grace period. A source that
             revises a value can change the result of a quorum-failure retry. The
@@ -911,6 +922,25 @@ class AetherClaim(gl.contract.Contract):
         if not _payload_ok(res):
             raise gl.vm.UserError(f"{ERR_EXTERNAL} malformed consensus payload")
         tier = int(res["tier"])
+
+        count = int(res["source_count"])
+        is_holder = gl.message.sender_address == pol.policyholder
+        if tier == -2 or (count < SOURCE_COUNT and not is_holder):
+            if not is_holder:
+                # Third-party call during an outage. Do not settle and do not
+                # write state: no lower-tier lock, no consumed retry slot.
+                return {
+                    "policy_id": policy_id,
+                    "settled": False,
+                    "outcome": TIER_LABEL[-2],
+                    "payout_tier": 0,
+                    "approved_payout": "0",
+                    "source_count": count,
+                    "reasoning": (
+                        f"QUORUM_FAILURE: {count} of {SOURCE_COUNT} sources answered; "
+                        "degraded settlement is policyholder-only; retry permitted"
+                    ),
+                }
 
         evals = (int(prior.evaluations) if prior is not None else 0) + 1
         payout = 0 if tier <= 0 else int(pol.coverage_amount) * TIER_PAYOUT_BPS[tier] // 10000
