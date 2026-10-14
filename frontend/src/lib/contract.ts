@@ -13,7 +13,7 @@ export const RPC_URLS = [
 ];
 export const EXPLORER = "https://explorer-studio-next.genlayer.com";
 
-export const READ_TIMEOUT_MS = 9000;
+export const READ_TIMEOUT_MS = 5000; // hard ceiling per read, across both RPCs
 export const TX_GAS_LIMIT = 500000; // explicit, so MetaMask never simulates GenVM
 export const TX_GAS_LIMIT_HEX = "0x" + TX_GAS_LIMIT.toString(16);
 export const TX_FEE_HEX = "0x3b9aca00"; // 1 gwei max fee & priority fee
@@ -101,32 +101,56 @@ async function buildClient(rpc: string, account?: string, provider?: unknown): P
 }
 
 const readClients = new Map<string, AnyClient>();
-let preferred = 0;
 
-/** Call a view on the primary RPC; on error/timeout fall back to the next one. */
-export async function readView<T = unknown>(functionName: string, args: unknown[] = []): Promise<T> {
-  let lastErr: unknown;
-  for (let i = 0; i < RPC_URLS.length; i++) {
-    const idx = (preferred + i) % RPC_URLS.length;
-    const rpc = RPC_URLS[idx];
-    try {
-      let client = readClients.get(rpc);
-      if (!client) {
-        client = await buildClient(rpc);
-        readClients.set(rpc, client);
-      }
-      const out = await withTimeout(
-        client.readContract({ address: CONTRACT_ADDRESS, functionName, args }),
-        READ_TIMEOUT_MS,
-        `${functionName}@${new URL(rpc).host}`,
-      );
-      preferred = idx;
-      return normalise(out) as T;
-    } catch (e) {
-      lastErr = e;
-    }
+// ---- read-health store (drives the "syncing" indicator) ------------------------
+export type ReadHealth = "unknown" | "live" | "cached";
+let health: ReadHealth = "unknown";
+const listeners = new Set<() => void>();
+export const readHealth = {
+  get: () => health,
+  subscribe: (fn: () => void) => {
+    listeners.add(fn);
+    return () => listeners.delete(fn);
+  },
+};
+function setHealth(h: ReadHealth) {
+  if (h !== health) {
+    health = h;
+    listeners.forEach((l) => l());
   }
-  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
+}
+
+async function readOne<T>(rpc: string, functionName: string, args: unknown[]): Promise<T> {
+  let client = readClients.get(rpc);
+  if (!client) {
+    client = await buildClient(rpc);
+    readClients.set(rpc, client);
+  }
+  const out = await client.readContract({ address: CONTRACT_ADDRESS, functionName, args });
+  return normalise(out) as T;
+}
+
+/**
+ * Query both RPCs in parallel; first success wins. The whole read is bounded by
+ * READ_TIMEOUT_MS so callers can never hang.
+ */
+export async function readView<T = unknown>(functionName: string, args: unknown[] = []): Promise<T> {
+  const attempts = RPC_URLS.map((rpc) => readOne<T>(rpc, functionName, args));
+  return withTimeout(Promise.any(attempts), READ_TIMEOUT_MS, `${functionName}`).catch((e) => {
+    throw e instanceof AggregateError ? new Error(String(e.errors[0]?.message ?? e.errors[0])) : e;
+  });
+}
+
+/** Read with a guaranteed answer: on failure/timeout, return `fallback` and flag cached state. */
+export async function readOr<T>(functionName: string, args: unknown[], fallback: T): Promise<{ data: T; live: boolean }> {
+  try {
+    const data = await readView<T>(functionName, args);
+    setHealth("live");
+    return { data, live: true };
+  } catch {
+    setHealth("cached");
+    return { data: fallback, live: false };
+  }
 }
 
 // ---- wallet --------------------------------------------------------------------
@@ -274,9 +298,20 @@ export interface Pool {
   max_epoch_exposure: string;
 }
 
+// Pre-seeded genesis state (mirrors GENESIS_PLOTS in contracts/aether_claim.py).
+export const GENESIS_PLOTS: Plot[] = [
+  { plot_id: "CV-ALMOND-01", name: "Central Valley Almond Basin", crop_type: "ALMOND", latitude: 36.6, longitude: -119.8, latitude_e4: 366000, longitude_e4: -1198000, baseline_rainfall_mm: 14, cadastral_hash: "7c1f0a52d19b3e6a8f4b0c2d9e57a31b6f8d40c7e92a5b1d3c68f0a47e2b9d15", crop_cycle: "Feb-Nov", active: true, registered_at: 0 },
+  { plot_id: "IA-CORN-01", name: "Iowa Corn Belt", crop_type: "CORN", latitude: 42.03, longitude: -93.82, latitude_e4: 420300, longitude_e4: -938200, baseline_rainfall_mm: 34, cadastral_hash: "b3a94e07c5d12f68a0e7b94c1d3f56a8e20c97b4d1f63a85c0e2b7194d6f3a08", crop_cycle: "Apr-Oct", active: true, registered_at: 0 },
+  { plot_id: "AND-OLIVE-01", name: "Andalusia Olive Groves", crop_type: "OLIVE", latitude: 37.38, longitude: -4.37, latitude_e4: 373800, longitude_e4: -43700, baseline_rainfall_mm: 21, cadastral_hash: "e51d7c3a9f08b246d1a5e83c70b9f4d2a6c18e5f307b94d2c1a8e6f05b3d7a49", crop_cycle: "Oct-Mar", active: true, registered_at: 0 },
+];
+export const GENESIS_POOL: Pool = {
+  pool_balance: "0", total_liabilities: "0", committed_payouts: "0", free_capital: "0",
+  epoch: 0, epoch_exposure: "0", max_epoch_exposure: (5n * ATTO).toString(),
+};
+
 export const api = {
-  plots: () => readView<Plot[]>("list_plots"),
-  pool: () => readView<Pool>("get_pool"),
-  policies: (holder: string) => readView<Policy[]>("list_policies", [holder]),
-  claim: (id: string) => readView<Claim | Record<string, never>>("get_claim", [id]),
+  plots: () => readOr<Plot[]>("list_plots", [], GENESIS_PLOTS),
+  pool: () => readOr<Pool>("get_pool", [], GENESIS_POOL),
+  policies: (holder: string) => readOr<Policy[]>("list_policies", [holder], []),
+  claim: (id: string) => readOr<Claim | Record<string, never>>("get_claim", [id], {}),
 };

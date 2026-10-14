@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, Claim, fromAtto, Policy, TIERS, writeCall } from "@/lib/contract";
 import { useWallet } from "@/lib/useAether";
+import SyncBadge from "./SyncBadge";
 
 export default function ClaimStream({ refreshKey }: { refreshKey: number }) {
   const { account, chainOk, connect } = useWallet();
@@ -20,10 +21,12 @@ export default function ClaimStream({ refreshKey }: { refreshKey: number }) {
     if (!account) return setRows([]);
     setLoading(true);
     try {
-      const policies = await api.policies(account);
+      const pr = await api.policies(account);
+      if (!pr.live) setMsg(null);
+      const policies = pr.data;
       const withClaims = await Promise.all(
         policies.map(async (policy) => {
-          const c = (await api.claim(policy.policy_id).catch(() => ({}))) as Claim;
+          const c = (await api.claim(policy.policy_id)).data as Claim;
           return { policy, claim: c && "outcome" in c ? c : null };
         }),
       );
@@ -67,7 +70,8 @@ export default function ClaimStream({ refreshKey }: { refreshKey: number }) {
   return (
     <section className="space-y-5">
       {msg && <div className="card px-4 py-3 font-mono text-xs text-wheat">{msg}</div>}
-      {loading && rows.length === 0 && <p className="text-sm text-mist">Loading policies…</p>}
+      <div className="flex justify-end"><SyncBadge /></div>
+      {loading && rows.length === 0 && <p className="text-sm text-mist">Querying chain (5s limit)…</p>}
       {!loading && rows.length === 0 && (
         <div className="card p-8 text-center text-mist">No policies for this account yet. Buy one in the Underwriting Desk.</div>
       )}
@@ -113,6 +117,7 @@ export default function ClaimStream({ refreshKey }: { refreshKey: number }) {
                 <div className="relative mt-1 h-3 overflow-hidden rounded-full bg-loam">
                   <div className="absolute inset-y-0 left-0 bg-wheat/35" style={{ width: `${linear * 100}%` }} />
                   <div className="absolute inset-y-0 left-0 bg-sprout" style={{ width: `${releasedPct}%` }} />
+                  {cooldown <= 0 && releasedPct < 100 && <div className="stream-bar absolute inset-y-0 left-0" style={{ width: `${Math.max(linear * 100, releasedPct)}%` }} />}
                 </div>
                 <div className="mt-1 flex justify-between font-mono text-[10px] text-mist">
                   <span>approved</span>

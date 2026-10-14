@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
-import { api, Plot } from "@/lib/contract";
+import { api, GENESIS_PLOTS, fromAtto, Plot, Policy } from "@/lib/contract";
+import SyncBadge from "./SyncBadge";
 
 const CROP_GLYPH: Record<string, string> = { ALMOND: "◐", CORN: "▥", OLIVE: "◍" };
 
@@ -16,22 +17,29 @@ export default function PlotRegistry({
   selected: string | null;
   onSelect: (id: string) => void;
 }) {
-  const [plots, setPlots] = useState<Plot[]>([]);
-  const [err, setErr] = useState<string | null>(null);
+  // Never blank: start from the pre-seeded genesis registry, upgrade to live data.
+  const [plots, setPlots] = useState<Plot[]>(GENESIS_PLOTS);
+  const [policies, setPolicies] = useState<Policy[] | null>(null);
+  const err: string | null = null;
 
   useEffect(() => {
-    api
-      .plots()
-      .then(setPlots)
-      .catch((e) => setErr(e.message));
+    api.plots().then((r) => setPlots(r.data));
+    api.policies("").then((r) => setPolicies(r.live ? r.data : null));
   }, []);
+
+  const coverage = (id: string) => {
+    if (!policies) return null;
+    const mine = policies.filter((p) => p.plot_id === id && p.status === "ACTIVE");
+    const total = mine.reduce((a, p) => a + BigInt(p.coverage_amount), 0n);
+    return { n: mine.length, total };
+  };
 
   const sel = plots.find((p) => p.plot_id === selected) ?? plots[0];
 
   return (
     <section className="grid gap-6 lg:grid-cols-5">
       <div className="card relative overflow-hidden p-4 lg:col-span-3">
-        <div className="label mb-3">Authenticated parcel map</div>
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2"><div className="label">Authenticated parcel map</div><SyncBadge /></div>
         <div className="relative aspect-[2/1] rounded-lg border border-line bg-loam">
           {[25, 50, 75].map((p) => (
             <div key={p} className="absolute inset-x-0 border-t border-line/60" style={{ top: `${p}%` }} />
@@ -68,8 +76,6 @@ export default function PlotRegistry({
 
       <div className="card p-5 lg:col-span-2">
         <div className="label">Parcel inspector</div>
-        {err && <p className="mt-3 text-sm text-rust">Registry unavailable: {err}</p>}
-        {!sel && !err && <p className="mt-3 text-sm text-mist">Loading registry…</p>}
         {sel && (
           <div className="mt-3 space-y-3">
             <h3 className="font-display text-2xl">{sel.name}</h3>
@@ -87,11 +93,24 @@ export default function PlotRegistry({
                 {sel.cadastral_hash}
               </code>
             </div>
-            <span
-              className={`inline-block rounded-full border px-3 py-1 font-mono text-xs ${sel.active ? "border-sprout text-sprout" : "border-wheat text-wheat"}`}
-            >
-              {sel.active ? "ACTIVE · insurable" : "STAGED · 24h delay"}
-            </span>
+            <div>
+              <div className="label">Rainfall baseline</div>
+              <div className="mt-2 h-2 rounded-full bg-loam">
+                <div className="h-2 rounded-full bg-gradient-to-r from-cyan to-sprout" style={{ width: `${Math.min(100, sel.baseline_rainfall_mm * 2.5)}%` }} />
+              </div>
+              <div className="mt-1 font-mono text-[11px] text-mist">{sel.baseline_rainfall_mm} mm expected per 14-day window</div>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <span className={`rounded-full border px-3 py-1 font-mono text-xs ${sel.active ? "border-sprout text-sprout" : "border-wheat text-wheat"}`}>
+                {sel.active ? "ACTIVE · insurable" : "STAGED · 24h delay"}
+              </span>
+              <span className="rounded-full border border-line px-3 py-1 font-mono text-xs text-mist">
+                {(() => {
+                  const c = coverage(sel.plot_id);
+                  return c ? `${c.n} live ${c.n === 1 ? "policy" : "policies"} · ${fromAtto(c.total, 3)} GEN` : "coverage: syncing";
+                })()}
+              </span>
+            </div>
           </div>
         )}
       </div>

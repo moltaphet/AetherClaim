@@ -5,12 +5,22 @@
 :root { color-scheme: dark; }
 body {
   background:
-    radial-gradient(1200px 500px at 85% -10%, rgba(233,196,106,.08), transparent 60%),
-    radial-gradient(900px 500px at -10% 110%, rgba(143,209,106,.07), transparent 60%),
-    #0b0d0a;
-  color: #e7eadf;
+    radial-gradient(1100px 520px at 88% -12%, rgba(34,211,238,.10), transparent 60%),
+    radial-gradient(900px 520px at -8% 108%, rgba(52,211,153,.09), transparent 60%),
+    radial-gradient(700px 400px at 50% 40%, rgba(251,191,36,.035), transparent 70%),
+    #09090b;
+  color: #e5e9f0;
 }
-.card { @apply rounded-xl border border-line bg-furrow/80 backdrop-blur; }
-.btn { @apply inline-flex items-center justify-center rounded-lg border border-wheat/60 px-4 py-2 text-sm font-medium text-wheat transition hover:bg-wheat hover:text-soil disabled:cursor-not-allowed disabled:opacity-40; }
-.btn-solid { @apply bg-wheat text-soil hover:bg-wheat/80; }
-.label { @apply font-mono text-[11px] uppercase tracking-[0.18em] text-mist; }
+.card { @apply rounded-2xl border border-line bg-furrow/80 shadow-[0_1px_0_rgba(255,255,255,0.03)_inset,0_20px_40px_-24px_rgba(0,0,0,0.8)] backdrop-blur; }
+.btn { @apply inline-flex items-center justify-center rounded-xl border border-cyan/40 px-4 py-2 text-sm font-medium text-cyan transition hover:bg-cyan/10 disabled:cursor-not-allowed disabled:opacity-40; }
+.btn-solid { @apply border-transparent bg-gradient-to-r from-sprout to-cyan text-soil hover:opacity-90; }
+.label { @apply font-mono text-[11px] uppercase tracking-[0.16em] text-mist; }
+
+@keyframes sweep { to { transform: rotate(360deg); } }
+@keyframes shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+.radar-sweep { animation: sweep 4s linear infinite; }
+.stream-bar {
+  background-image: linear-gradient(90deg, rgba(52,211,153,.0), rgba(255,255,255,.35), rgba(52,211,153,.0));
+  background-size: 200% 100%;
+  animation: shimmer 2.4s linear infinite;
+}

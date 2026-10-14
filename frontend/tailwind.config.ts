@@ -5,17 +5,18 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
-        soil: "#0b0d0a",
-        furrow: "#12160f",
-        loam: "#1a2015",
-        line: "#2a3322",
-        wheat: "#e9c46a",
-        sprout: "#8fd16a",
-        rust: "#e76f51",
-        mist: "#9aa592",
+        soil: "#09090b",
+        furrow: "#0f1318",
+        loam: "#161b22",
+        line: "#273140",
+        wheat: "#fbbf24",
+        sprout: "#34d399",
+        cyan: { DEFAULT: "#22d3ee" },
+        rust: "#fb7185",
+        mist: "#94a3b8",
       },
       fontFamily: {
-        display: ["Fraunces", "Georgia", "serif"],
+        display: ["Inter", "ui-sans-serif", "system-ui", "sans-serif"],
         mono: ["ui-monospace", "SFMono-Regular", "Menlo", "monospace"],
       },
     },

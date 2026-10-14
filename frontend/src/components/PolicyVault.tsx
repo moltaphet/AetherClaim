@@ -1,20 +1,22 @@
 "use client";
 import { useEffect, useMemo, useState } from "react";
-import { api, ATTO, fromAtto, PREMIUM_BPS, Plot, Pool, TIERS, toAtto, writeCall } from "@/lib/contract";
+import { api, ATTO, fromAtto, GENESIS_PLOTS, GENESIS_POOL, PREMIUM_BPS, Plot, Pool, TIERS, toAtto, writeCall } from "@/lib/contract";
+import SyncBadge from "./SyncBadge";
 import { useWallet } from "@/lib/useAether";
 
 export default function PolicyVault({ plotId, onChange }: { plotId: string | null; onChange: () => void }) {
   const { account, chainOk, connect } = useWallet();
-  const [plots, setPlots] = useState<Plot[]>([]);
-  const [pool, setPool] = useState<Pool | null>(null);
-  const [plot, setPlot] = useState<string>(plotId ?? "");
+  const [plots, setPlots] = useState<Plot[]>(GENESIS_PLOTS);
+  const [pool, setPool] = useState<Pool>(GENESIS_POOL);
+  const [plot, setPlot] = useState<string>(plotId ?? GENESIS_PLOTS[0].plot_id);
   const [coverage, setCoverage] = useState("0.5");
+  const slider = Math.min(5, Math.max(0.01, parseFloat(coverage) || 0));
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
   const load = () => {
-    api.plots().then((p) => setPlots(p)).catch(() => undefined);
-    api.pool().then(setPool).catch(() => undefined);
+    api.plots().then((r) => setPlots(r.data));
+    api.pool().then((r) => setPool(r.data));
   };
   useEffect(load, []);
   useEffect(() => {
@@ -40,12 +42,12 @@ export default function PolicyVault({ plotId, onChange }: { plotId: string | nul
     }
   };
 
-  const used = pool ? Number((BigInt(pool.epoch_exposure) * 100n) / (BigInt(pool.max_epoch_exposure) || 1n)) : 0;
+  const used = Number((BigInt(pool.epoch_exposure) * 100n) / (BigInt(pool.max_epoch_exposure) || 1n));
 
   return (
     <section className="grid gap-6 lg:grid-cols-5">
       <div className="card p-6 lg:col-span-3">
-        <div className="label">Underwriting desk</div>
+        <div className="flex items-center justify-between"><div className="label">Underwriting desk</div><SyncBadge /></div>
         <h3 className="mt-1 font-display text-2xl">Buy a parametric drought policy</h3>
         <div className="mt-6 grid gap-5 sm:grid-cols-2">
           <label className="block">
@@ -69,6 +71,16 @@ export default function PolicyVault({ plotId, onChange }: { plotId: string | nul
               onChange={(e) => setCoverage(e.target.value)}
               inputMode="decimal"
               className="mt-1 w-full rounded-lg border border-line bg-loam px-3 py-2 font-mono text-sm"
+            />
+            <input
+              type="range"
+              min={0.01}
+              max={5}
+              step={0.01}
+              value={slider}
+              onChange={(e) => setCoverage(e.target.value)}
+              className="mt-3 w-full accent-cyan-400"
+              aria-label="Coverage amount"
             />
           </label>
         </div>
@@ -97,7 +109,7 @@ export default function PolicyVault({ plotId, onChange }: { plotId: string | nul
               <div key={t.tier} className="flex items-center justify-between rounded-lg border border-line bg-loam px-3 py-2">
                 <span className={`font-mono text-xs ${t.color}`}>{t.label}</span>
                 <span className="font-mono text-xs text-mist">
-                  deficit ≥ {t.min}% → <b className="text-white">{t.payoutBps / 100}%</b>
+                  ≥{t.min}% → <b className="text-white">{t.payoutBps / 100}%</b> · {fromAtto((cov * BigInt(t.payoutBps)) / 10000n, 3)} GEN
                 </span>
               </div>
             ))}
@@ -105,8 +117,7 @@ export default function PolicyVault({ plotId, onChange }: { plotId: string | nul
         </div>
         <div className="card p-5">
           <div className="label">Pool solvency</div>
-          {pool ? (
-            <>
+          <>
               <div className="mt-2 grid grid-cols-2 gap-3 text-sm">
                 <Stat k="Pool" v={`${fromAtto(pool.pool_balance, 3)} GEN`} />
                 <Stat k="Reserved" v={`${fromAtto(pool.total_liabilities, 3)} GEN`} />
@@ -123,9 +134,6 @@ export default function PolicyVault({ plotId, onChange }: { plotId: string | nul
                 </div>
               </div>
             </>
-          ) : (
-            <p className="mt-2 text-sm text-mist">Loading pool…</p>
-          )}
         </div>
       </div>
     </section>

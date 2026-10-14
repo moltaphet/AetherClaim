@@ -1,6 +1,6 @@
 "use client";
 import { useCallback, useEffect, useState } from "react";
-import { api, Plot, tierForDeficit, TIERS } from "@/lib/contract";
+import { api, GENESIS_PLOTS, Plot, tierForDeficit, TIERS } from "@/lib/contract";
 
 interface Reading {
   name: string;
@@ -46,7 +46,7 @@ async function timed<T>(fn: () => Promise<T>): Promise<{ v: T; ms: number }> {
 }
 
 export default function TelemetryRadar({ plotId }: { plotId: string | null }) {
-  const [plot, setPlot] = useState<Plot | null>(null);
+  const [plot, setPlot] = useState<Plot | null>(GENESIS_PLOTS[0]);
   const [rows, setRows] = useState<Reading[]>([
     { name: "Open-Meteo ERA5", status: "idle" },
     { name: "NOAA GFS (Open-Meteo)", status: "idle" },
@@ -55,7 +55,7 @@ export default function TelemetryRadar({ plotId }: { plotId: string | null }) {
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    api.plots().then((ps) => setPlot(ps.find((p) => p.plot_id === plotId) ?? ps[0] ?? null)).catch(() => undefined);
+    api.plots().then((r) => setPlot(r.data.find((p) => p.plot_id === plotId) ?? r.data[0] ?? null));
   }, [plotId]);
 
   const scan = useCallback(async () => {
@@ -164,10 +164,23 @@ export default function TelemetryRadar({ plotId }: { plotId: string | null }) {
       <div className="card flex flex-col justify-between p-5">
         <div>
           <div className="label">Consensus quorum</div>
-          <div className={`mt-3 font-display text-3xl ${quorum ? "text-sprout" : "text-wheat"}`}>
-            {valid.length}/3 sources
+          <div className="relative mx-auto mt-4 h-36 w-36 overflow-hidden rounded-full border border-cyan/30 bg-loam">
+            {[33, 66].map((r) => (
+              <div key={r} className="absolute inset-0 m-auto rounded-full border border-cyan/15" style={{ width: `${r}%`, height: `${r}%` }} />
+            ))}
+            <div className="radar-sweep absolute inset-0 rounded-full" style={{ background: "conic-gradient(from 0deg, rgba(34,211,238,0.35), transparent 25%)" }} />
+            <div className="absolute inset-0 flex flex-col items-center justify-center">
+              <span className={`font-display text-3xl font-semibold ${quorum ? "text-sprout" : "text-wheat"}`}>{valid.length}/3</span>
+              <span className="font-mono text-[10px] text-mist">sources</span>
+            </div>
           </div>
-          <p className="mt-2 font-mono text-xs">{verdict}</p>
+          <div className="mt-4 text-center">
+            <div className="label">Agreed tier</div>
+            <div className={`mt-1 font-display text-2xl font-semibold ${quorum ? TIERS[[...tiers][0] ?? 0].color : "text-mist"}`}>
+              {quorum ? `TIER ${[...tiers][0]}` : "—"}
+            </div>
+            <p className="mt-1 font-mono text-xs">{verdict}</p>
+          </div>
         </div>
         <ul className="mt-6 space-y-1 text-xs text-mist">
           <li>≥ 2 sources must answer HTTP 200</li>
