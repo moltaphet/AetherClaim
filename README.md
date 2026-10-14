@@ -409,10 +409,23 @@ transaction is built. Weather fetches use a 6 s abort timeout, and a station
 that returns a null, missing or negative day is marked `DATA_ERROR` and excluded
 from the quorum view rather than read as 0 mm.
 
-**Dependency audit.** `npm audit` reports 9 findings (1 critical, 6 high, 2
-moderate) in `next` 14.2.35, `postcss` and `tailwindcss`. `npm audit fix` changes
-nothing: every remaining fix is a breaking major upgrade (Next 16, Tailwind 4),
-which was not applied unreviewed. The app is client-rendered and uses no
-`next/image`, middleware, rewrites or CSP nonces, and the image optimizer is
-disabled in `next.config.mjs`. For a production deployment, serve it as a static
-export or upgrade Next.js.
+**Dependency audit.** `npm audit` reports 6 findings (1 critical, 5 high), all in
+`next` 14.2.35 itself. `package.json` `overrides` pin `postcss` to 8.5.30 and
+`postcss-selector-parser` to 7.1.6, which cleared the postcss findings. The build
+output is byte-identical before and after. The remaining `next` findings have no
+fix inside Next 14. The fix is a breaking major upgrade, which was not applied
+unreviewed. The app is client-rendered and uses no `next/image`, middleware,
+rewrites or CSP nonces, and the image optimizer is disabled in `next.config.mjs`.
+For a production deployment, serve it as a static export or upgrade Next.js.
+
+**Numeric parity.** The frontend's telemetry preview uses the contract's exact
+arithmetic: per-day rainfall to tenths with round-half-to-even (Python's `round`,
+not `Math.round`), integer floor division for baselines and deficits, and the
+same 10 mm floor. This was checked against the contract's own Python functions on
+9,401 rounding inputs (375 of which differ from half-up rounding) and 90,930
+deficit and tier boundary cases, with no mismatches.
+
+**Account switching.** Panels are keyed by the connected account, so switching
+accounts unmounts them and no policy, claim, share balance or notice from the
+previous address can be shown for the new one. Responses that arrive after a
+switch are discarded.

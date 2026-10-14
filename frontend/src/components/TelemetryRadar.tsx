@@ -1,6 +1,15 @@
 "use client";
 import { useCallback, useEffect, useState } from "react";
-import { api, GENESIS_PLOTS, MIN_INSURABLE_BASELINE_MM, Plot, tierForDeficit, TIERS, windowBaselineMm } from "@/lib/contract";
+import {
+  api,
+  computeDeficitTier,
+  GENESIS_PLOTS,
+  Plot,
+  tenthsFromMm,
+  TIERS,
+  windowBaselineTenths,
+  windowDeficit,
+} from "@/lib/contract";
 
 type Status = "idle" | "ok" | "offline" | "data_error";
 
@@ -48,7 +57,7 @@ function strictWindows(byDate: Map<string, unknown>, start: Date): number[] {
     if (typeof v !== "number" || !Number.isFinite(v) || v < 0) {
       throw new DataError(`${key}: ${v === undefined ? "missing" : v === null ? "null" : `invalid (${String(v)})`}`);
     }
-    out[i < 14 ? 0 : 1] += Math.round(v * 10);
+    out[i < 14 ? 0 : 1] += tenthsFromMm(v); // banker's rounding, same as the contract
   }
   return out;
 }
@@ -98,22 +107,18 @@ export default function TelemetryRadar({ plotId }: { plotId: string | null }) {
     // Each window is judged against the baseline of the month its midpoint falls in.
     const baseTenths = [0, 1].map((w) => {
       const mid = new Date(start.getTime() + (w * 14 + 6.5) * 86400000);
-      return Math.round(windowBaselineMm(plot, mid.getUTCMonth() + 1) * 10);
+      return windowBaselineTenths(plot, mid.getUTCMonth() + 1);
     });
 
     const toRow = (name: string, windowsTenths: number[], ms: number): Reading => {
-      const defs = windowsTenths.map((t, i) => {
-        const b = baseTenths[i];
-        // Micro-baseline floor: an arid window reads 0% (same rule as the contract).
-        if (b < MIN_INSURABLE_BASELINE_MM * 10) return 0;
-        return t >= b ? 0 : Math.floor(((b - t) * 100) / b);
-      });
+      // Same arithmetic as the contract: integer floor division, floor for arid windows.
+      const defs = windowsTenths.map((t, i) => windowDeficit(baseTenths[i], t));
       return {
         name,
         status: "ok",
         ms,
         windowMm: windowsTenths.map((t) => t / 10),
-        tier: tierForDeficit(Math.min(...defs)),
+        tier: computeDeficitTier(Math.min(...defs)),
       };
     };
 

@@ -245,7 +245,7 @@ const EXEC_NAMES = [
   "NONDET_DISAGREE",
   "DETERMINISTIC_VIOLATION",
 ];
-const EXEC_FAILURES = new Set(["FINISHED_WITH_ERROR", "TIMEOUT", "NONDET_DISAGREE", "DETERMINISTIC_VIOLATION"]);
+const EXEC_FAILURES = new Set(["TIMEOUT", "NONDET_DISAGREE", "DETERMINISTIC_VIOLATION"]);
 const RESULT_FAILURES = new Set([
   "DISAGREE",
   "TIMEOUT",
@@ -264,18 +264,35 @@ type ReceiptLike = {
 };
 
 /**
- * An ACCEPTED status is not success: a contract that raised still produces an
- * accepted transaction. Read the execution result and the consensus result.
+ * Normalise an execution-result name. The SDK reports FINISHED_WITH_RETURN and
+ * FINISHED_WITH_ERROR; FINALIZED is a transaction *status*, not an execution
+ * result. A finality-flavoured spelling such as FINALIZED_WITH_RETURN is accepted
+ * too, so a receipt that reports finality is never misread as unverified.
+ */
+function execKind(name: string | undefined): "return" | "error" | "failure" | "other" | undefined {
+  if (!name) return undefined;
+  const n = name.toUpperCase();
+  if (n.endsWith("_WITH_RETURN")) return "return";
+  if (n.endsWith("_WITH_ERROR")) return "error";
+  if (EXEC_FAILURES.has(n)) return "failure";
+  return "other";
+}
+
+/**
+ * An ACCEPTED or FINALIZED status is not success on its own: a contract that
+ * raised still produces an accepted transaction. Read the execution result and
+ * the consensus result.
  */
 export function assessReceipt(r: ReceiptLike | null | undefined): { state: "success" | "reverted" | "unverified"; detail: string } {
   if (!r) return { state: "unverified", detail: "no receipt returned" };
-  const exec =
+  const execName =
     r.txExecutionResultName ??
     (typeof r.txExecutionResult === "number" ? EXEC_NAMES[r.txExecutionResult] : undefined);
-  if (exec && EXEC_FAILURES.has(exec)) return { state: "reverted", detail: `execution ${exec}` };
-  if (r.resultName && RESULT_FAILURES.has(r.resultName)) return { state: "reverted", detail: `consensus ${r.resultName}` };
-  if (r.statusName && STATUS_FAILURES.has(r.statusName)) return { state: "reverted", detail: `status ${r.statusName}` };
-  if (exec === "FINISHED_WITH_RETURN") return { state: "success", detail: exec };
+  const kind = execKind(execName);
+  if (kind === "error" || kind === "failure") return { state: "reverted", detail: `execution ${execName}` };
+  if (r.resultName && RESULT_FAILURES.has(r.resultName.toUpperCase())) return { state: "reverted", detail: `consensus ${r.resultName}` };
+  if (r.statusName && STATUS_FAILURES.has(r.statusName.toUpperCase())) return { state: "reverted", detail: `status ${r.statusName}` };
+  if (kind === "return") return { state: "success", detail: String(execName) };
   return { state: "unverified", detail: "execution result not reported by the receipt" };
 }
 
@@ -477,9 +494,50 @@ export function termWindowsInsurable(p: Pick<Plot, "monthly_baselines">, from = 
   return windowInsurable(p, month(obsEnd - 20.5 * DAY)) && windowInsurable(p, month(obsEnd - 6.5 * DAY));
 }
 
+/**
+ * Python 3's round(): round half to even. Math.round() rounds half up, which
+ * differs on exact ties (2.5 -> 2 in Python, 3 in JS). The contract converts each
+ * day's rainfall with `int(round(float(v) * 10))`, so the same rule is needed here.
+ */
+export function roundHalfToEven(x: number): number {
+  const f = Math.floor(x);
+  const d = x - f;
+  if (d < 0.5) return f;
+  if (d > 0.5) return f + 1;
+  return f % 2 === 0 ? f : f + 1;
+}
+
+/** One day's rainfall in mm to integer tenths, exactly as the contract does it. */
+export function tenthsFromMm(mm: number): number {
+  return roundHalfToEven(mm * 10);
+}
+
+/** Expected rain, in tenths of mm, for one 14-day window in `month` (1..12). Integer floor division, like the contract. */
+export function windowBaselineTenths(p: Pick<Plot, "monthly_baselines">, month: number): number {
+  return Math.floor((p.monthly_baselines[month - 1] * 10 * WINDOW_DAYS) / DAYS_PER_MONTH);
+}
+
 /** Expected rain (mm) for one 14-day window whose midpoint falls in `month` (1..12). */
 export function windowBaselineMm(p: Pick<Plot, "monthly_baselines">, month: number): number {
-  return Math.floor((p.monthly_baselines[month - 1] * 10 * WINDOW_DAYS) / DAYS_PER_MONTH) / 10;
+  return windowBaselineTenths(p, month) / 10;
+}
+
+/** Mirror of the contract's `_deficit_pct`: integer floor division, no rounding. */
+export function deficitPct(baselineTenths: number, observedTenths: number): number {
+  if (baselineTenths <= 0) return 0;
+  if (observedTenths >= baselineTenths) return 0;
+  return Math.floor(((baselineTenths - observedTenths) * 100) / baselineTenths);
+}
+
+/** Sustained deficit of one window, including the micro-baseline floor. */
+export function windowDeficit(baselineTenths: number, observedTenths: number): number {
+  if (baselineTenths < MIN_INSURABLE_BASELINE_MM * 10) return 0;
+  return deficitPct(baselineTenths, observedTenths);
+}
+
+/** Tier for a sustained deficit percentage. Mirror of `_tier_for_deficit`. */
+export function computeDeficitTier(deficit: number): number {
+  return tierForDeficit(deficit);
 }
 
 // Pre-seeded genesis state (mirrors GENESIS_PLOTS in contracts/aether_claim.py).

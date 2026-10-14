@@ -1,5 +1,5 @@
 "use client";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   api,
   Claim,
@@ -36,11 +36,26 @@ export default function ClaimStream({ refreshKey }: { refreshKey: number }) {
     return () => clearInterval(t);
   }, []);
 
+  // Every load gets a ticket. A response from a previous address, or from before
+  // an unmount, is discarded rather than rendered under the new account.
+  const ticket = useRef(0);
+  useEffect(() => {
+    const t = ticket;
+    return () => {
+      t.current += 1;
+    };
+  }, []);
+
   const load = useCallback(async () => {
-    if (!account) return setRows([]);
+    const mine = ++ticket.current;
+    if (!account) {
+      setRows([]);
+      return;
+    }
     setLoading(true);
     try {
       const pr = await api.policies(account);
+      if (mine !== ticket.current) return;
       setLive(pr.live);
       if (!pr.live) return; // keep the last known rows, show the sync alert
       const withClaims = await Promise.all(
@@ -50,6 +65,7 @@ export default function ClaimStream({ refreshKey }: { refreshKey: number }) {
           return { policy, claim: cr.live && c && "outcome" in c ? c : null, claimLive: cr.live };
         }),
       );
+      if (mine !== ticket.current) return;
       setRows(withClaims);
       // Claims already past their cooldown at load time need no extra refetch.
       const nowSec = Math.floor(Date.now() / 1000);
@@ -58,9 +74,9 @@ export default function ClaimStream({ refreshKey }: { refreshKey: number }) {
       );
       setRefetched((r) => ({ ...r, ...Object.fromEntries(passed.map((d) => [d.policy.policy_id, true])) }));
     } catch {
-      setLive(false);
+      if (mine === ticket.current) setLive(false);
     } finally {
-      setLoading(false);
+      if (mine === ticket.current) setLoading(false);
     }
   }, [account]);
 
@@ -114,9 +130,9 @@ export default function ClaimStream({ refreshKey }: { refreshKey: number }) {
       {notice && <div className={`card px-4 py-3 font-mono text-xs ${NOTICE_CLASS[notice.tone]}`}>{notice.text}</div>}
       <div className="flex justify-end"><SyncBadge /></div>
       {!live && <SyncAlert what="Your policy list" />}
-      {loading && rows.length === 0 && live && <p className="text-sm text-mist">Querying chain (5s limit)…</p>}
+      {loading && rows.length === 0 && live && <p className="text-sm text-mist">Connecting… loading policies for this account (5s limit)</p>}
       {!loading && live && rows.length === 0 && (
-        <div className="card p-8 text-center text-mist">No policies for this account yet. Buy one in the Underwriting Desk.</div>
+        <div className="card p-8 text-center text-mist">No policies found for this account. Buy one in the Underwriting Desk.</div>
       )}
       {rows.map(({ policy, claim, claimLive }) => {
         const approved = claim ? BigInt(claim.approved_payout) : 0n;

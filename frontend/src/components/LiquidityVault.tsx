@@ -1,5 +1,5 @@
 "use client";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
   ATTO,
@@ -42,20 +42,38 @@ export default function LiquidityVault({ refreshKey }: { refreshKey: number }) {
     return () => clearInterval(t);
   }, []);
 
+  // A response that arrives after an account switch or an unmount is discarded,
+  // so a previous address's share balance can never be rendered for the new one.
+  const ticket = useRef(0);
+  useEffect(() => {
+    const t = ticket;
+    return () => {
+      t.current += 1;
+    };
+  }, []);
+
   const load = useCallback(() => {
+    const mine = ++ticket.current;
+    const fresh = () => mine === ticket.current;
     api.pool().then((r) => {
+      if (!fresh()) return;
       setPoolLive(r.live);
       if (r.live) setPool(r.data);
     });
     api.policies("").then((r) => {
+      if (!fresh()) return;
       setPoliciesLive(r.live);
       if (r.live) setPolicies(r.data);
     });
-    if (account)
+    if (account) {
+      setLpLive(false);
+      setLp({ shares: "0", value: "0", total_shares: "0" });
       api.lp(account).then((r) => {
+        if (!fresh()) return;
         setLpLive(r.live);
         if (r.live) setLp(r.data);
       });
+    }
   }, [account]);
   useEffect(load, [load, refreshKey]);
 

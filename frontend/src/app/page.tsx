@@ -8,7 +8,7 @@ import PolicyVault from "@/components/PolicyVault";
 import ProtocolExplainer from "@/components/ProtocolExplainer";
 import TelemetryRadar from "@/components/TelemetryRadar";
 import WalletManager from "@/components/WalletManager";
-import { WalletProvider } from "@/lib/useAether";
+import { useWallet, WalletProvider } from "@/lib/useAether";
 
 const TABS = [
   { id: "plots", label: "Plot Registry" },
@@ -21,7 +21,8 @@ const TABS = [
 type TabId = (typeof TABS)[number]["id"];
 const isTab = (id: string): id is TabId => TABS.some((t) => t.id === id);
 
-export default function Page() {
+function Dashboard() {
+  const { account } = useWallet();
   const [tab, setTab] = useState<TabId>("plots");
   const [plot, setPlot] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
@@ -49,7 +50,6 @@ export default function Page() {
   }, [navigate]);
 
   return (
-    <WalletProvider>
       <div className="mx-auto max-w-6xl px-5 pb-20">
         <header className="flex flex-wrap items-center justify-between gap-4 py-6">
           <div>
@@ -87,7 +87,10 @@ export default function Page() {
           ))}
         </nav>
 
-        <div id={tab} className="scroll-mt-6">
+        {/* Keyed by account: switching accounts unmounts every panel, so no policy,
+            claim, share balance, notice or busy flag from the previous address can
+            survive into the new one. */}
+        <div key={account ?? "disconnected"} id={tab} className="scroll-mt-6">
           {tab === "plots" && <PlotRegistry selected={plot} onSelect={setPlot} />}
           {tab === "telemetry" && <TelemetryRadar plotId={plot} />}
           {tab === "desk" && <PolicyVault plotId={plot} onChange={() => setTick((n) => n + 1)} />}
@@ -101,6 +104,13 @@ export default function Page() {
 
         <Footer onNavigate={navigate} />
       </div>
+  );
+}
+
+export default function Page() {
+  return (
+    <WalletProvider>
+      <Dashboard />
     </WalletProvider>
   );
 }

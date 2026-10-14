@@ -86,14 +86,23 @@ export type Outcome = "success" | "failed" | "unverified";
  */
 export function assessReceipt(r: Receipt): Outcome {
   const n = Number(r.status);
-  const accepted = n === 5 || n === 7 || r.statusName === "ACCEPTED" || r.statusName === "FINISHED";
+  // ACCEPTED and FINALIZED are both terminal-success *statuses*. (An earlier
+  // revision of this check wrongly looked for "FINISHED", which is an execution
+  // result, not a status.)
+  const statusName = (r.statusName ?? "").toUpperCase();
+  const accepted = n === 5 || n === 7 || statusName === "ACCEPTED" || statusName === "FINALIZED";
   if (!accepted) return "failed";
-  const exec =
-    r.txExecutionResultName ?? (typeof r.txExecutionResult === "number" ? EXEC_NAMES[r.txExecutionResult] : undefined);
+  const execName = (
+    r.txExecutionResultName ?? (typeof r.txExecutionResult === "number" ? EXEC_NAMES[r.txExecutionResult] : "")
+  ).toUpperCase();
   const bad = ["DISAGREE", "TIMEOUT", "DETERMINISTIC_VIOLATION", "NO_MAJORITY", "MAJORITY_DISAGREE", "MAJORITY_TIMEOUT"];
-  if (r.resultName && bad.includes(r.resultName)) return "failed";
-  if (exec && exec !== "FINISHED_WITH_RETURN") return "failed";
-  return exec === "FINISHED_WITH_RETURN" ? "success" : "unverified";
+  if (r.resultName && bad.includes(r.resultName.toUpperCase())) return "failed";
+  if (execName.endsWith("_WITH_ERROR") || ["TIMEOUT", "NONDET_DISAGREE", "DETERMINISTIC_VIOLATION"].includes(execName)) {
+    return "failed";
+  }
+  // FINISHED_WITH_RETURN is what the SDK reports. FINALIZED_WITH_RETURN is
+  // accepted too, so a receipt that reports finality is never misread.
+  return execName.endsWith("_WITH_RETURN") ? "success" : "unverified";
 }
 
 function addressFrom(r: Receipt): string | undefined {
