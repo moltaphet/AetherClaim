@@ -9,10 +9,15 @@ import pytest
 
 from conftest import (
     ARID,
+    ARID_APR,
+    ARID_APR_PLOT,
+    ARID_MAR,
+    ARID_MAR_PLOT,
     ARID_PLOT,
     ATTO,
     CONTRACT,
     DAY,
+    EXPIRED_AT,
     FLAT,
     HASH,
     MATURITY,
@@ -35,18 +40,27 @@ from conftest import (
     warp_to,
 )
 
+CV = "CV-ALMOND-01"
+
 
 @pytest.fixture
 def env(direct_vm, direct_deploy, direct_alice, direct_bob, direct_charlie):
-    # Genesis plots and the test plots are staged 9 days before T0 and activated
-    # 8 days later, clear of the 7-day staging timelock.
+    # Test plots are staged 9 days before T0 and activated 8 days later, clear of
+    # the 7-day staging timelock.
     warp_to(direct_vm, T0 - timedelta(days=9))
     direct_vm.sender = direct_alice  # deployer == admin
     c = direct_deploy(CONTRACT, 500 * ATTO)
-    for pid, monthly in [(TEST_PLOT, FLAT), (ARID_PLOT, ARID), (SEASONAL_PLOT, SEASONAL)]:
+    test_plots = [
+        (TEST_PLOT, FLAT),
+        (ARID_PLOT, ARID),
+        (SEASONAL_PLOT, SEASONAL),
+        (ARID_MAR_PLOT, ARID_MAR),
+        (ARID_APR_PLOT, ARID_APR),
+    ]
+    for pid, monthly in test_plots:
         c.stage_plot(pid, f"Test {pid}", "TEST", 300000, -1000000, monthly, HASH, 1, 12)
     warp_to(direct_vm, T0 - timedelta(days=1))
-    for pid in (TEST_PLOT, ARID_PLOT, SEASONAL_PLOT):
+    for pid, _ in test_plots:
         c.activate_plot(pid)
     warp_to(direct_vm, T0)
     provide(c, direct_vm, direct_bob, 100 * ATTO)
@@ -68,14 +82,20 @@ def claim_with(e, mm, pid=None):
     return pid, e.c.evaluate_claim(pid)
 
 
+def _hex(env, who):
+    env.vm.sender = who
+    return env.c.whoami()
+
+
 # ----------------------------------------------------------- normal lifecycle
 class TestLifecycle:
     def test_genesis_registry(self, env):
         ids = {p["plot_id"] for p in env.c.list_plots()}
         assert {"CV-ALMOND-01", "IA-CORN-01", "AND-OLIVE-01"} <= ids
-        cv = env.c.get_plot("CV-ALMOND-01")
-        assert len(cv["monthly_baselines"]) == 12
-        assert (cv["crop_cycle_start_month"], cv["crop_cycle_end_month"]) == (2, 11)
+        cv = env.c.get_plot(CV)
+        assert cv["monthly_baselines"][0] == 50 and len(cv["monthly_baselines"]) == 12
+        assert (cv["crop_cycle_start_month"], cv["crop_cycle_end_month"]) == (11, 3)  # Nov-Mar
+        assert cv["crop_cycle"] == "Nov-Mar"
         assert env.c.get_plot("AND-OLIVE-01")["crop_cycle_start_month"] == 10  # wraps year end
 
     def test_stage_then_activate_after_delay(self, env):
@@ -140,9 +160,12 @@ class TestLifecycle:
         with env.vm.expect_revert("nothing vested"):
             env.c.release_payout(pid)
 
-    def test_expire_releases_reserve(self, env):
+    def test_expire_releases_reserve_after_grace(self, env):
         pid = buy(env.c, env.vm, env.farmer)
-        warp_to(env.vm, T0 + timedelta(days=90 + 15))
+        warp_to(env.vm, T0 + timedelta(days=POLICY_DAYS + 15))  # still inside the grace
+        with env.vm.expect_revert("grace period"):
+            env.c.expire_policy(pid)
+        warp_to(env.vm, EXPIRED_AT)
         env.c.expire_policy(pid)
         assert int(env.c.get_pool()["total_liabilities"]) == 0
 
@@ -158,6 +181,12 @@ class TestLifecycle:
         uniform(env.vm, TIER3)  # mocked for the policy's own window, not for today's
         env.vm.sender = env.farmer
         assert env.c.evaluate_claim(pid)["payout_tier"] == 3
+
+    def test_grace_and_retry_hold_constants(self, env):
+        cfg = env.c.get_config()
+        assert cfg["expiry_grace_days"] == 30
+        assert cfg["retry_hold_days"] == 14
+        assert cfg["min_insurable_baseline_mm"] == 10
 
 
 # ----------------------------------------------------------------- adversarial
@@ -181,23 +210,32 @@ class TestAdversarialProtection:
         with env.vm.expect_revert("only admin"):
             env.c.stage_plot("EVIL", "x", "x", 0, 0, FLAT, "c" * 64, 1, 12)
 
-    def test_single_source_fault_is_inconclusive(self, env):
+    def test_single_source_fault_is_final_and_cannot_be_waited_out(self, env):
+        """One station reports 0 mm while two report normal rain. The split is a
+        final no-payout. A later outage of the dissenting source must not flip it."""
         pid = buy(env.c, env.vm, env.farmer)
         warp_to(env.vm, MATURITY + timedelta(hours=3))
         mock_sources(env.vm, (0.0, 0.0), gfs=(NORMAL, NORMAL), nasa=(NORMAL, NORMAL))
         env.vm.sender = env.farmer
         claim = env.c.evaluate_claim(pid)
-        assert claim["outcome"] == "INCONCLUSIVE"
+        assert claim["outcome"] == "INCONCLUSIVE_DISAGREE"
         assert claim["approved_payout"] == "0"
-        assert env.c.get_policy(pid)["status"] == "ACTIVE"
+        assert env.c.get_policy(pid)["status"] == "SETTLED_NO_PAYOUT"
+        # The dissenter goes down, and the two remaining sources read a breach.
+        # The policyholder must not get a second verdict.
+        warp_to(env.vm, MATURITY + timedelta(days=2))
+        mock_sources(env.vm, (TIER3, TIER3), gfs=None, nasa=(TIER3, TIER3))
+        with env.vm.expect_revert("not claimable"):
+            env.c.evaluate_claim(pid)
 
-    def test_too_few_sources_is_inconclusive(self, env):
+    def test_too_few_sources_is_quorum_failure_and_retryable(self, env):
         pid = buy(env.c, env.vm, env.farmer)
         warp_to(env.vm, MATURITY + timedelta(hours=3))
         mock_sources(env.vm, (TIER3, TIER3), gfs=None, nasa=None)
         env.vm.sender = env.farmer
         claim = env.c.evaluate_claim(pid)
-        assert claim["outcome"] == "INCONCLUSIVE" and claim["source_count"] == 1
+        assert claim["outcome"] == "INCONCLUSIVE_QUORUM" and claim["source_count"] == 1
+        assert env.c.get_policy(pid)["status"] == "ACTIVE"  # still open for a retry
 
     def test_two_of_three_sources_can_settle(self, env):
         pid = buy(env.c, env.vm, env.farmer)
@@ -277,6 +315,29 @@ class TestAdversarialProtection:
         warp_to(env.vm, MATURITY)
         assert env.c.evaluate_claim(pid)["payout_tier"] == 3
 
+    def test_evaluation_closes_after_grace(self, env):
+        pid = buy(env.c, env.vm, env.farmer)
+        uniform(env.vm, TIER3)
+        warp_to(env.vm, EXPIRED_AT)
+        env.vm.sender = env.farmer
+        with env.vm.expect_revert("expired"):
+            env.c.evaluate_claim(pid)
+
+    def test_outage_retry_window_survives_until_day_thirty(self, env):
+        """A policyholder whose sources were down keeps the claim open for a retry
+        until the 30-day grace ends. Expiry then waits 14 days after the last try."""
+        pid = buy(env.c, env.vm, env.farmer)
+        warp_to(env.vm, T0 + timedelta(days=POLICY_DAYS + 29, hours=3))  # late in grace
+        mock_sources(env.vm, (TIER3, TIER3), gfs=None, nasa=None)  # outage
+        env.vm.sender = env.farmer
+        assert env.c.evaluate_claim(pid)["outcome"] == "INCONCLUSIVE_QUORUM"
+        warp_to(env.vm, EXPIRED_AT)  # grace over, but the last try is 2 days old
+        with env.vm.expect_revert("retry hold"):
+            env.c.expire_policy(pid)
+        warp_to(env.vm, T0 + timedelta(days=POLICY_DAYS + 29, hours=3) + timedelta(days=14, minutes=1))
+        env.c.expire_policy(pid)
+        assert env.c.get_policy(pid)["status"] == "EXPIRED"
+
     def test_epoch_exposure_cap(self, env):
         env.vm.sender = env.admin
         env.c.set_max_epoch_exposure(15 * ATTO)
@@ -330,47 +391,31 @@ class TestAdversarialProtection:
         assert env.c.get_lp(_hex(env, env.lp))["shares"] == str(100 * ATTO)  # nothing moved
         env.c.withdraw_liquidity(50 * ATTO)  # partial exit still allowed
 
-        warp_to(env.vm, T0 + timedelta(days=POLICY_DAYS + 15))
+        warp_to(env.vm, EXPIRED_AT)
         env.c.expire_policy("P-1")  # liabilities clear
         env.c.withdraw_liquidity(50 * ATTO)  # now the final exit is allowed
         pool = env.c.get_pool()
         assert pool["total_lp_shares"] == "0" and pool["pool_balance"] == "0"
 
-    def test_arid_micro_baseline_evaluates_to_zero_deficit(self, env):
-        """A 2 mm/month plot has a 0.9 mm window baseline, under the 10 mm floor.
-        Zero rain there must not trigger Tier 3. Control: the same zero rain on a
-        30 mm/month plot is catastrophic."""
-        arid = buy(env.c, env.vm, env.farmer, 10 * ATTO, plot=ARID_PLOT)
-        control = buy(env.c, env.vm, env.farmer, 10 * ATTO, plot=TEST_PLOT)
-        warp_to(env.vm, MATURITY + timedelta(hours=3))
-        mock_sources(env.vm, (0.0, 0.0))
+    # Round 4: worthless-policy guard
+    @pytest.mark.parametrize("plot", [ARID_PLOT, ARID_MAR_PLOT, ARID_APR_PLOT])
+    def test_arid_term_reverts_at_purchase(self, env, plot):
+        """An arid term (any final window under the 10 mm floor) must not be sold:
+        it could only ever settle at 0%. Both windows are checked, so an arid March
+        or an arid April each reverts on its own."""
+        warp_to(env.vm, datetime(2026, 1, 10, tzinfo=timezone.utc))  # term Jan 10 - Apr 10
         env.vm.sender = env.farmer
-        arid_claim = env.c.evaluate_claim(arid)
-        assert arid_claim["payout_tier"] == 0 and arid_claim["approved_payout"] == "0"
-        assert env.c.get_policy(arid)["status"] == "SETTLED_NO_PAYOUT"
-        assert env.c.evaluate_claim(control)["payout_tier"] == 3
+        env.vm.value = 10 * ATTO * 800 // 10000
+        with env.vm.expect_revert("Term uninsurable: observation window falls in arid month"):
+            env.c.create_policy(plot, 10 * ATTO)
 
-    def test_inconclusive_retry_then_settlement_is_final(self, env):
-        pid = buy(env.c, env.vm, env.farmer)
-        warp_to(env.vm, MATURITY + timedelta(hours=3))
-        mock_sources(env.vm, (TIER3, TIER3), gfs=None, nasa=None)  # one source only
-        env.vm.sender = env.farmer
-        assert env.c.evaluate_claim(pid)["outcome"] == "INCONCLUSIVE"
-        with env.vm.expect_revert("too recently"):
-            env.c.evaluate_claim(pid)
-        warp_to(env.vm, MATURITY + timedelta(days=1, hours=3))  # sources recovered
-        uniform(env.vm, TIER3)
-        assert env.c.evaluate_claim(pid)["payout_tier"] == 3
-        with env.vm.expect_revert("not claimable"):
-            env.c.evaluate_claim(pid)
+    def test_arid_control_plot_still_insurable(self, env):
+        """Control: the same term on the 30 mm/month plot is accepted."""
+        warp_to(env.vm, datetime(2026, 1, 10, tzinfo=timezone.utc))
+        assert buy(env.c, env.vm, env.farmer, 10 * ATTO, plot=TEST_PLOT).startswith("P-")
 
 
 # ----------------------------------------------------------- audit regressions
-def _hex(env, who):
-    env.vm.sender = who
-    return env.c.whoami()
-
-
 class TestAuditRegressions:
     # Issue #1: seasonal baselines and crop cycle
     def test_seasonal_summer_exploit_prevented(self, env):
@@ -419,7 +464,44 @@ class TestAuditRegressions:
         with env.vm.expect_revert("monthly_baselines"):
             env.c.stage_plot("B4", "x", "x", 0, 0, [-1] + FLAT[1:], HASH, 3, 10)
 
-    # Issue #2: admin self-dealing
+    # Round 4: Central Valley winter programme
+    def test_central_valley_summer_term_rejected(self, env):
+        warp_to(env.vm, datetime(2026, 6, 1, tzinfo=timezone.utc))
+        env.vm.sender = env.farmer
+        env.vm.value = 10 * ATTO * 800 // 10000
+        with env.vm.expect_revert("off-season"):
+            env.c.create_policy(CV, 10 * ATTO)
+
+    def test_central_valley_purchase_calendar(self, env):
+        """Purchases start Nov 1 to Dec 31. A term starting Dec 31 ends Mar 31, the
+        last in-season day. A term starting Jan 1 reaches April, which is off-season."""
+        warp_to(env.vm, datetime(2026, 12, 31, tzinfo=timezone.utc))
+        assert buy(env.c, env.vm, env.farmer, 10 * ATTO, plot=CV).startswith("P-")
+        warp_to(env.vm, datetime(2027, 1, 1, tzinfo=timezone.utc))
+        env.vm.sender = env.farmer
+        env.vm.value = 10 * ATTO * 800 // 10000
+        with env.vm.expect_revert("off-season"):
+            env.c.create_policy(CV, 10 * ATTO)
+
+    def test_central_valley_winter_policy_insurable_and_settles(self, env):
+        """Term 2026-11-01 to 2027-01-30. Both final windows fall in January,
+        baseline 50 mm/month, 23.3 mm per window. Observed 15 mm in each is a 35%
+        deficit: Tier 1, a 30% payout."""
+        warp_to(env.vm, datetime(2026, 11, 1, tzinfo=timezone.utc))
+        pid = buy(env.c, env.vm, env.farmer, 10 * ATTO, plot=CV)
+        pol = env.c.get_policy(pid)
+        assert pol["observation_end"] == int(datetime(2027, 1, 29, tzinfo=timezone.utc).timestamp())
+        assert pol["observation_start"] == int(datetime(2027, 1, 2, tzinfo=timezone.utc).timestamp())
+        warp_to(env.vm, datetime(2027, 2, 5, 3, tzinfo=timezone.utc))  # term end + 6 days
+        mock_sources(env.vm, (15.0, 15.0), obs_end=datetime(2027, 1, 29, tzinfo=timezone.utc))
+        env.vm.sender = env.farmer
+        claim = env.c.evaluate_claim(pid)
+        assert claim["payout_tier"] == 1 and claim["outcome"] == "MODERATE_DROUGHT"
+        assert claim["median_deficit"] == 35
+        assert int(claim["approved_payout"]) == 3 * ATTO  # 30% of 10 GEN
+        assert env.c.get_policy(pid)["status"] == "CLAIM_APPROVED"
+
+    # Round 2/3 carried forward: admin self-dealing, vault shares, payloads
     def test_admin_self_insurance_prevented(self, env):
         env.vm.sender = env.admin
         env.c.stage_plot("ADM-01", "Admin Farm", "PECAN", 300000, -1000000, FLAT, "d" * 64, 1, 12)
@@ -442,7 +524,6 @@ class TestAuditRegressions:
             env.c.set_max_epoch_exposure(10**30)
         env.c.set_max_epoch_exposure(50 * ATTO)
 
-    # Issues #3/#4: share-based vault
     def test_lp_share_fair_loss_distribution(self, env):
         """Two equal LPs. One tries to leave just before a claim is recognised;
         the remaining LP must not be left holding the whole loss."""
@@ -474,7 +555,7 @@ class TestAuditRegressions:
 
     def test_lp_earns_accumulated_premiums(self, env):
         buy(env.c, env.vm, env.farmer, 10 * ATTO)  # 0.8 GEN premium into the pool
-        warp_to(env.vm, T0 + timedelta(days=POLICY_DAYS + 15))
+        warp_to(env.vm, EXPIRED_AT)
         env.vm.sender = env.farmer
         env.c.expire_policy("P-1")  # unclaimed: reserve released, premium kept
         assert env.c.get_pool()["share_price_atto"] == str(1008 * 10**15)
@@ -497,7 +578,6 @@ class TestAuditRegressions:
         with env.vm.expect_revert("exceeds your shares"):
             env.c.withdraw_liquidity(1)
 
-    # Issue #5: payload validation
     def test_validator_rejects_malformed_leader_payload(self, env):
         pid = buy(env.c, env.vm, env.farmer)
         warp_to(env.vm, MATURITY + timedelta(hours=3))
@@ -512,11 +592,14 @@ class TestAuditRegressions:
             "negative deficit": {**good, "median_deficit": -5},
             "deficit over 100": {**good, "median_deficit": 400},
             "tier out of range": {**good, "tier": 9},
+            "tier below range": {**good, "tier": -3},
             "tier not int": {**good, "tier": "2"},
             "bool tier": {**good, "tier": True},
             "float deficit": {**good, "median_deficit": 64.5},
             "tier/deficit mismatch": {**good, "tier": 3, "median_deficit": 10},
             "settled below quorum": {**good, "source_count": 1},
+            "quorum failure with 3 sources": {"tier": -2, "median_deficit": 0, "source_count": 3, "reasoning": "x"},
+            "disagreement with 1 source": {"tier": -1, "median_deficit": 50, "source_count": 1, "reasoning": "x"},
             "too many sources": {**good, "source_count": 99},
             "oversized reasoning": {**good, "reasoning": "A" * 5000},
             "control chars": {**good, "reasoning": "ok\x00\x1b[31m"},
@@ -526,6 +609,19 @@ class TestAuditRegressions:
         }
         for name, payload in bad.items():
             assert env.vm.run_validator(leader_result=payload) is False, name
+
+    def test_outcome_class_is_consensus_checked(self, env):
+        """A leader cannot relabel a split as an outage to get a retry. The class
+        code is compared exactly, like any tier."""
+        pid = buy(env.c, env.vm, env.farmer)
+        warp_to(env.vm, MATURITY + timedelta(hours=3))
+        mock_sources(env.vm, (TIER3, TIER3), gfs=(NORMAL, NORMAL), nasa=(NORMAL, NORMAL))  # all 3 answer; ERA5 dissents
+        env.vm.sender = env.farmer
+        env.c.evaluate_claim(pid)
+        relabelled = {"tier": -2, "median_deficit": 0, "source_count": 1, "reasoning": "x"}
+        assert env.vm.run_validator(leader_result=relabelled) is False
+        split = {"tier": -1, "median_deficit": 50, "source_count": 3, "reasoning": "x"}
+        assert env.vm.run_validator(leader_result=split) is True
 
     def test_stored_reasoning_is_canonical_not_leader_text(self, env):
         _, claim = claim_with(env, TIER2)

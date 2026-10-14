@@ -31,7 +31,14 @@ SEASONAL_PLOT = "SEASONAL-03"  # March 30 mm, April 60 mm: windows straddle mont
 FLAT = [30] * 12
 ARID = [2] * 12
 SEASONAL = [30, 30, 30, 60, 30, 30, 30, 30, 30, 30, 30, 30]
+# An arid month inside one of the two final windows: purchase must revert.
+ARID_MAR_PLOT = "ARID-MAR-04"  # March 2 mm
+ARID_APR_PLOT = "ARID-APR-05"  # April 2 mm
+ARID_MAR = [30, 30, 2, 30, 30, 30, 30, 30, 30, 30, 30, 30]
+ARID_APR = [30, 30, 30, 2, 30, 30, 30, 30, 30, 30, 30, 30]
 PLOT = TEST_PLOT
+# Term end plus the 30-day outage grace: past this, the reserve is releasable.
+EXPIRED_AT = T0 + timedelta(days=POLICY_DAYS + 31)
 
 # Observed mm per 14-day window against the 14.0 mm FLAT baseline.
 NORMAL, TIER1, TIER2, TIER3 = 14.0, 10.0, 5.0, 2.0

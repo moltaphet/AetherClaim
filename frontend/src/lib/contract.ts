@@ -4,7 +4,7 @@
 export const CHAIN_ID = 61997;
 export const CHAIN_ID_HEX = "0xf22d";
 export const CONTRACT_ADDRESS =
-  process.env.NEXT_PUBLIC_AETHER_CLAIM_ADDRESS ?? "0x6Ee88b72fd33A3e6FB475Aae3f966e9b58fa213b";
+  process.env.NEXT_PUBLIC_AETHER_CLAIM_ADDRESS ?? "0x2641A4678ba75EE21ad6f8A7436209B5675f8B23";
 
 // Primary first, fallback second. Both serve chain 61997.
 export const RPC_URLS = [
@@ -331,6 +331,8 @@ export const STAGING_DELAY_DAYS = 7;
 export const MIN_INSURABLE_BASELINE_MM = 10; // windows expecting less rain cannot pay
 export const DATA_LAG_DAYS = 6;
 export const TERM_DAYS = 90;
+export const EXPIRY_GRACE_DAYS = 30; // evaluation stays open this long after term end
+export const RETRY_HOLD_DAYS = 14; // expiry waits this long after an outage attempt
 
 export function monthInCycle(month: number, start: number, end: number): boolean {
   return start <= end ? month >= start && month <= end : month >= start || month <= end;
@@ -372,7 +374,7 @@ export function windowBaselineMm(p: Pick<Plot, "monthly_baselines">, month: numb
 
 // Pre-seeded genesis state (mirrors GENESIS_PLOTS in contracts/aether_claim.py).
 export const GENESIS_PLOTS: Plot[] = [
-  { plot_id: "CV-ALMOND-01", name: "Central Valley Almond Basin", crop_type: "ALMOND", latitude: 36.6, longitude: -119.8, latitude_e4: 366000, longitude_e4: -1198000, monthly_baselines: [50, 45, 30, 20, 8, 2, 0, 0, 4, 15, 30, 45], cadastral_hash: "7c1f0a52d19b3e6a8f4b0c2d9e57a31b6f8d40c7e92a5b1d3c68f0a47e2b9d15", crop_cycle: "Feb-Nov", crop_cycle_start_month: 2, crop_cycle_end_month: 11, active: true, registered_at: 0 },
+  { plot_id: "CV-ALMOND-01", name: "Central Valley Almond Basin", crop_type: "ALMOND", latitude: 36.6, longitude: -119.8, latitude_e4: 366000, longitude_e4: -1198000, monthly_baselines: [50, 45, 35, 15, 8, 2, 0, 0, 4, 15, 25, 45], cadastral_hash: "7c1f0a52d19b3e6a8f4b0c2d9e57a31b6f8d40c7e92a5b1d3c68f0a47e2b9d15", crop_cycle: "Nov-Mar", crop_cycle_start_month: 11, crop_cycle_end_month: 3, active: true, registered_at: 0 },
   { plot_id: "IA-CORN-01", name: "Iowa Corn Belt", crop_type: "CORN", latitude: 42.03, longitude: -93.82, latitude_e4: 420300, longitude_e4: -938200, monthly_baselines: [25, 28, 55, 95, 120, 140, 115, 110, 85, 70, 50, 35], cadastral_hash: "b3a94e07c5d12f68a0e7b94c1d3f56a8e20c97b4d1f63a85c0e2b7194d6f3a08", crop_cycle: "Apr-Oct", crop_cycle_start_month: 4, crop_cycle_end_month: 10, active: true, registered_at: 0 },
   { plot_id: "AND-OLIVE-01", name: "Andalusia Olive Groves", crop_type: "OLIVE", latitude: 37.38, longitude: -4.37, latitude_e4: 373800, longitude_e4: -43700, monthly_baselines: [60, 55, 50, 45, 30, 10, 2, 3, 25, 60, 75, 70], cadastral_hash: "e51d7c3a9f08b246d1a5e83c70b9f4d2a6c18e5f307b94d2c1a8e6f05b3d7a49", crop_cycle: "Oct-Mar", crop_cycle_start_month: 10, crop_cycle_end_month: 3, active: true, registered_at: 0 },
 ];
@@ -396,3 +398,31 @@ export const api = {
     readOr<LpPosition>("get_lp", [holder], { shares: "0", value: "0", total_shares: "0" }),
   claim: (id: string) => readOr<Claim | Record<string, never>>("get_claim", [id], {}),
 };
+
+/**
+ * First start date (UTC midnight) on or after `from` whose 90-day term passes
+ * both the crop-cycle check and the window-floor check. Null if none within `maxDays`.
+ */
+export function nextInsurableStart(p: Plot, from = new Date(), maxDays = 400): Date | null {
+  const DAY = 86400000;
+  const base = Date.UTC(from.getUTCFullYear(), from.getUTCMonth(), from.getUTCDate());
+  for (let d = 0; d <= maxDays; d++) {
+    const start = new Date(base + d * DAY);
+    if (termInsideCycle(p, start) && termWindowsInsurable(p, start)) return start;
+  }
+  return null;
+}
+
+/** Plain-language label for a settled or inconclusive claim outcome. */
+export function outcomeNote(outcome: string): string {
+  switch (outcome) {
+    case "INCONCLUSIVE_QUORUM":
+      return "fewer than 2 sources answered · retry open";
+    case "INCONCLUSIVE_DISAGREE":
+      return "sources disagree · final, no payout";
+    case "NORMAL":
+      return "no drought · final, no payout";
+    default:
+      return "";
+  }
+}

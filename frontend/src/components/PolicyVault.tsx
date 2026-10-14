@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useMemo, useState } from "react";
-import { api, ATTO, fromAtto, GENESIS_PLOTS, GENESIS_POOL, PREMIUM_BPS, termInsideCycle, termWindowsInsurable, Plot, Pool, TIERS, toAtto, writeCall } from "@/lib/contract";
+import { api, ATTO, EXPIRY_GRACE_DAYS, fromAtto, GENESIS_PLOTS, GENESIS_POOL, nextInsurableStart, PREMIUM_BPS, termInsideCycle, termWindowsInsurable, Plot, Pool, TIERS, toAtto, writeCall } from "@/lib/contract";
 import SyncBadge from "./SyncBadge";
 import WalletSimNote from "./WalletSimNote";
 import { useWallet } from "@/lib/useAether";
@@ -95,7 +95,7 @@ export default function PolicyVault({ plotId, onChange }: { plotId: string | nul
           <Stat k="Term" v="90 days" />
         </div>
 
-        <button className="btn btn-solid mt-6 w-full" disabled={busy || cov <= 0n || !inSeason || (!!account && !chainOk)} onClick={buy}>
+        <button className="btn btn-solid mt-6 w-full" disabled={busy || cov <= 0n || !inSeason || !windowsPayable || (!!account && !chainOk)} onClick={buy}>
           {!account ? "Connect wallet to buy" : busy ? "Awaiting consensus…" : `Pay ${fromAtto(premium, 5)} GEN premium`}
         </button>
         {!inSeason && selectedPlot && (
@@ -104,10 +104,21 @@ export default function PolicyVault({ plotId, onChange }: { plotId: string | nul
             ({selectedPlot.crop_cycle}). The contract rejects it so ordinary dry seasons cannot be insured.
           </p>
         )}
+        {selectedPlot && (
+          <p className="mt-3 font-mono text-[11px] text-mist">
+            Next insurable start for {selectedPlot.name}:{" "}
+            <span className="text-cyan">
+              {(() => {
+                const d = nextInsurableStart(selectedPlot);
+                return d ? d.toISOString().slice(0, 10) : "none in the next year";
+              })()}
+            </span>
+          </p>
+        )}
         {!windowsPayable && selectedPlot && (
           <p className="mt-3 rounded-lg border border-wheat/40 px-3 py-2 text-xs text-wheat">
-            Arid term: the final observation windows of this term expect under 10 mm of rain, so the contract
-            treats them as non-insurable. This policy can settle at 0% only.
+            Arid term: a final observation window of this term expects under 10 mm of rain. The contract refuses
+            it at purchase, because it could only ever settle at 0%. Choose a later start date.
           </p>
         )}
         <p className="mt-3 text-xs text-mist">The protocol admin address cannot hold policies (anti self-dealing).</p>
@@ -115,7 +126,8 @@ export default function PolicyVault({ plotId, onChange }: { plotId: string | nul
         {msg && <p className={`mt-3 text-sm ${msg.ok ? "text-sprout" : "text-rust"}`}>{msg.text}</p>}
         <p className="mt-4 text-xs text-mist">
           The verdict covers only the final 28 days of your term, fixed at purchase. Evaluation opens 6 days
-          after the term ends (data lag), and a settled outcome is final. No daily re-checks.
+          after the term ends and stays open for {EXPIRY_GRACE_DAYS} days, so an outage cannot forfeit a claim.
+          A settled outcome is final. There are no daily re-checks.
         </p>
       </div>
 

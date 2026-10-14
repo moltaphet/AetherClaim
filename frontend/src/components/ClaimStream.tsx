@@ -1,6 +1,6 @@
 "use client";
 import { useCallback, useEffect, useState } from "react";
-import { api, Claim, fromAtto, Policy, TIERS, writeCall } from "@/lib/contract";
+import { api, Claim, EXPIRY_GRACE_DAYS, fromAtto, outcomeNote, Policy, TIERS, writeCall } from "@/lib/contract";
 import { useWallet } from "@/lib/useAether";
 import SyncBadge from "./SyncBadge";
 import WalletSimNote from "./WalletSimNote";
@@ -103,6 +103,7 @@ export default function ClaimStream({ refreshKey }: { refreshKey: number }) {
                 <Cell k="Validator agreement" v={`${claim.source_count}/3 sources`} />
                 <Cell k="Median deficit" v={`${claim.median_deficit}%`} />
                 <Cell k="Approved" v={`${fromAtto(approved, 4)} GEN`} />
+                <p className="font-mono text-[11px] text-wheat sm:col-span-4">{outcomeNote(claim.outcome)}</p>
                 <p className="font-mono text-[11px] text-mist sm:col-span-4">{claim.reasoning}</p>
               </div>
             )}
@@ -129,7 +130,7 @@ export default function ClaimStream({ refreshKey }: { refreshKey: number }) {
             )}
 
             <footer className="mt-5 flex flex-wrap gap-3">
-              {policy.status === "ACTIVE" && (
+              {policy.status === "ACTIVE" && now <= policy.end_ts + EXPIRY_GRACE_DAYS * 86400 && (
                 <button
                   className="btn"
                   disabled={!!busy || !chainOk || now < policy.matures_at}
@@ -142,6 +143,9 @@ export default function ClaimStream({ refreshKey }: { refreshKey: number }) {
                       ? `Opens ${new Date(policy.matures_at * 1000).toISOString().slice(0, 10)}`
                       : "Trigger consensus check"}
                 </button>
+              )}
+              {policy.status === "ACTIVE" && now > policy.end_ts + EXPIRY_GRACE_DAYS * 86400 && (
+                <span className="font-mono text-xs text-rust">evaluation window closed · reserve releases on expiry</span>
               )}
               {policy.status === "SETTLED_NO_PAYOUT" && (
                 <span className="font-mono text-xs text-mist">settled · no payout · final</span>
