@@ -135,6 +135,14 @@ export default async function main(client: Client): Promise<string> {
     });
     const seed = await client.waitForTransactionReceipt({ hash: seedHash, waitUntil: "decided", retries: RETRIES });
     console.log(`Liquidity seed ${ok(seed) ? "accepted" : "NOT accepted"} (${seedHash})`);
+    if (ok(seed)) {
+      // Record the seed alongside the deploy so the file is complete on its own.
+      const record = JSON.parse(readFileSync(path.resolve(process.cwd(), DEPLOYMENT_PATH), "utf8"));
+      writeFileSync(
+        path.resolve(process.cwd(), DEPLOYMENT_PATH),
+        JSON.stringify({ ...record, seedLiquidityTx: seedHash }, jsonSafe, 2),
+      );
+    }
   } catch (e) {
     console.log(`Liquidity seed failed: ${(e as Error).message?.slice(0, 160)}`);
   }

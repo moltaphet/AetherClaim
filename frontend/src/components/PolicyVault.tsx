@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useMemo, useState } from "react";
-import { api, ATTO, fromAtto, GENESIS_PLOTS, GENESIS_POOL, PREMIUM_BPS, termInsideCycle, Plot, Pool, TIERS, toAtto, writeCall } from "@/lib/contract";
+import { api, ATTO, fromAtto, GENESIS_PLOTS, GENESIS_POOL, PREMIUM_BPS, termInsideCycle, termWindowsInsurable, Plot, Pool, TIERS, toAtto, writeCall } from "@/lib/contract";
 import SyncBadge from "./SyncBadge";
 import WalletSimNote from "./WalletSimNote";
 import { useWallet } from "@/lib/useAether";
@@ -27,6 +27,7 @@ export default function PolicyVault({ plotId, onChange }: { plotId: string | nul
   const cov = useMemo(() => toAtto(coverage), [coverage]);
   const selectedPlot = plots.find((p) => p.plot_id === plot) ?? plots[0];
   const inSeason = selectedPlot ? termInsideCycle(selectedPlot) : true;
+  const windowsPayable = selectedPlot ? termWindowsInsurable(selectedPlot) : true;
   const premium = (cov * PREMIUM_BPS) / 10000n;
 
   const buy = async () => {
@@ -103,12 +104,18 @@ export default function PolicyVault({ plotId, onChange }: { plotId: string | nul
             ({selectedPlot.crop_cycle}). The contract rejects it so ordinary dry seasons cannot be insured.
           </p>
         )}
+        {!windowsPayable && selectedPlot && (
+          <p className="mt-3 rounded-lg border border-wheat/40 px-3 py-2 text-xs text-wheat">
+            Arid term: the final observation windows of this term expect under 10 mm of rain, so the contract
+            treats them as non-insurable. This policy can settle at 0% only.
+          </p>
+        )}
         <p className="mt-3 text-xs text-mist">The protocol admin address cannot hold policies (anti self-dealing).</p>
         <WalletSimNote />
         {msg && <p className={`mt-3 text-sm ${msg.ok ? "text-sprout" : "text-rust"}`}>{msg.text}</p>}
         <p className="mt-4 text-xs text-mist">
-          Observation windows must fall inside your coverage period — a policy bought after a drought cannot
-          claim it. The first claim is possible ~34 days after purchase.
+          The verdict covers only the final 28 days of your term, fixed at purchase. Evaluation opens 6 days
+          after the term ends (data lag), and a settled outcome is final. No daily re-checks.
         </p>
       </div>
 

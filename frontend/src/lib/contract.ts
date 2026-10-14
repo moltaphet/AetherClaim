@@ -4,7 +4,7 @@
 export const CHAIN_ID = 61997;
 export const CHAIN_ID_HEX = "0xf22d";
 export const CONTRACT_ADDRESS =
-  process.env.NEXT_PUBLIC_AETHER_CLAIM_ADDRESS ?? "0x9066D38A81FE5fE84b10c8dF9C4557b04bC26D83";
+  process.env.NEXT_PUBLIC_AETHER_CLAIM_ADDRESS ?? "0x6Ee88b72fd33A3e6FB475Aae3f966e9b58fa213b";
 
 // Primary first, fallback second. Both serve chain 61997.
 export const RPC_URLS = [
@@ -293,6 +293,9 @@ export interface Policy {
   end_ts: number;
   claimed: boolean;
   status: string;
+  observation_start: number; // unix seconds, fixed at purchase
+  observation_end: number;
+  matures_at: number; // evaluation opens here (term end + reanalysis lag)
 }
 export interface Claim {
   policy_id: string;
@@ -325,6 +328,9 @@ export const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "
 export const DAYS_PER_MONTH = 30;
 export const WINDOW_DAYS = 14;
 export const STAGING_DELAY_DAYS = 7;
+export const MIN_INSURABLE_BASELINE_MM = 10; // windows expecting less rain cannot pay
+export const DATA_LAG_DAYS = 6;
+export const TERM_DAYS = 90;
 
 export function monthInCycle(month: number, start: number, end: number): boolean {
   return start <= end ? month >= start && month <= end : month >= start || month <= end;
@@ -338,6 +344,25 @@ export function termInsideCycle(p: Pick<Plot, "crop_cycle_start_month" | "crop_c
   }
   const m = new Date(from.getTime() + 90 * 86400000).getUTCMonth() + 1;
   return monthInCycle(m, p.crop_cycle_start_month, p.crop_cycle_end_month);
+}
+
+/** A window can pay only if its expected rain clears the micro-baseline floor. */
+export function windowInsurable(p: Pick<Plot, "monthly_baselines">, month: number): boolean {
+  return windowBaselineMm(p, month) >= MIN_INSURABLE_BASELINE_MM;
+}
+
+/**
+ * Both final observation windows of a term bought at `from` (default now) must
+ * clear the floor, otherwise the policy can never pay. Mirrors the contract:
+ * observation_end is the last full day inside the term, and window midpoints
+ * sit 6.5 and 20.5 days before it.
+ */
+export function termWindowsInsurable(p: Pick<Plot, "monthly_baselines">, from = new Date()): boolean {
+  const DAY = 86400000;
+  const endDay = Date.UTC(from.getUTCFullYear(), from.getUTCMonth(), from.getUTCDate()) + TERM_DAYS * DAY;
+  const obsEnd = endDay - DAY;
+  const month = (ms: number) => new Date(ms).getUTCMonth() + 1;
+  return windowInsurable(p, month(obsEnd - 20.5 * DAY)) && windowInsurable(p, month(obsEnd - 6.5 * DAY));
 }
 
 /** Expected rain (mm) for one 14-day window whose midpoint falls in `month` (1..12). */

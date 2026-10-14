@@ -1,6 +1,6 @@
 "use client";
 import { useCallback, useEffect, useState } from "react";
-import { api, GENESIS_PLOTS, Plot, tierForDeficit, TIERS, windowBaselineMm } from "@/lib/contract";
+import { api, GENESIS_PLOTS, MIN_INSURABLE_BASELINE_MM, Plot, tierForDeficit, TIERS, windowBaselineMm } from "@/lib/contract";
 
 interface Reading {
   name: string;
@@ -76,7 +76,9 @@ export default function TelemetryRadar({ plotId }: { plotId: string | null }) {
       const defs = windows.map((w, i) => {
         const t = Math.round(w * 10);
         const b = baseTenths[i];
-        return b <= 0 || t >= b ? 0 : Math.floor(((b - t) * 100) / b);
+        // Micro-baseline floor: an arid window reads 0% (same rule as the contract).
+        if (b < MIN_INSURABLE_BASELINE_MM * 10) return 0;
+        return t >= b ? 0 : Math.floor(((b - t) * 100) / b);
       });
       return { name, status: "ok", ms, windowMm: windows, tier: tierForDeficit(Math.min(...defs)) };
     };
@@ -136,7 +138,7 @@ export default function TelemetryRadar({ plotId }: { plotId: string | null }) {
         <div className="flex items-center justify-between">
           <div>
             <div className="label">Live telemetry · {plot?.name ?? "…"}</div>
-            <p className="mt-1 text-xs text-mist">Last 28 observed days · 2 × 14-day windows · browser-side preview of what validators fetch.</p>
+            <p className="mt-1 text-xs text-mist">Live preview: two 14-day windows ending 6 days ago. A policy settles only on its own term&apos;s final 28 days, fixed at purchase.</p>
           </div>
           <button className="btn" onClick={scan} disabled={busy || !plot}>
             {busy ? "Pinging…" : "Re-scan"}

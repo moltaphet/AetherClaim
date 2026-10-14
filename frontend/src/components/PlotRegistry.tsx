@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
-import { api, GENESIS_PLOTS, fromAtto, monthInCycle, MONTHS, Plot, Policy, STAGING_DELAY_DAYS } from "@/lib/contract";
+import { api, GENESIS_PLOTS, fromAtto, MIN_INSURABLE_BASELINE_MM, monthInCycle, MONTHS, Plot, Policy, STAGING_DELAY_DAYS, windowInsurable } from "@/lib/contract";
 import SyncBadge from "./SyncBadge";
 
 const CROP_GLYPH: Record<string, string> = { ALMOND: "◐", CORN: "▥", OLIVE: "◍" };
@@ -94,11 +94,12 @@ export default function PlotRegistry({
               </code>
             </div>
             <div>
-              <div className="label">Monthly rainfall baseline (mm) · highlighted = insurable cycle</div>
+              <div className="label">Monthly rainfall baseline (mm) · lit = insurable</div>
               <div className="mt-2 flex h-24 items-end gap-1">
                 {sel.monthly_baselines.map((mm, i) => {
                   const max = Math.max(...sel.monthly_baselines, 1);
-                  const on = monthInCycle(i + 1, sel.crop_cycle_start_month, sel.crop_cycle_end_month);
+                  const inCycle = monthInCycle(i + 1, sel.crop_cycle_start_month, sel.crop_cycle_end_month);
+                  const on = inCycle && windowInsurable(sel, i + 1);
                   return (
                     <div key={i} className="flex flex-1 flex-col items-center gap-1" title={`${MONTHS[i]}: ${mm} mm`}>
                       <div
@@ -111,7 +112,7 @@ export default function PlotRegistry({
                 })}
               </div>
               <p className="mt-1 font-mono text-[11px] text-mist">
-                Each 14-day window is judged against its own month. Off-season months cannot be insured.
+                Each 14-day window is judged against its own month. Off-season months, and windows expecting under {MIN_INSURABLE_BASELINE_MM} mm, cannot pay.
               </p>
             </div>
             <div className="flex flex-wrap gap-2">

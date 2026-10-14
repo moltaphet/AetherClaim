@@ -23,8 +23,13 @@
 #   4. Discrete payouts. Only 0 / 30 / 70 / 100 percent exist. Validators
 #      compare the integer tier EXACTLY, never a tolerance band, so the money
 #      moved is identical on every validator (no economic drift).
-#   5. Anti-adverse-selection. Observation windows must lie entirely inside
-#      the coverage period, so a policy cannot be bought after the drought.
+#   5. European exercise. The verdict is taken once, after the policy's FINAL
+#      28-day observation windows (fixed at purchase) have matured. Nothing can
+#      be re-checked daily, and a settled outcome is final.
+#   7. Micro-baseline floor. A window expecting under 10 mm cannot evidence a
+#      drought, so it reads 0%. Arid seasons cannot trigger catastrophic tiers.
+#   8. LP orphan guard. The last LP cannot exit while policies are live, so no
+#      reserved capital is left without a shareholder.
 #   6. Cooldown + vesting + exposure caps. Approved payouts sit through a
 #      24h cooldown, then vest linearly over 3 days; per-epoch underwriting is
 #      capped and total liabilities may never exceed the pool.
@@ -51,6 +56,10 @@ EPOCH_SECONDS = 7 * DAY  # exposure accounting epoch
 WINDOW_DAYS = 14  # one observation window
 N_WINDOWS = 2  # consecutive windows that must both breach
 DATA_LAG_DAYS = 6  # reanalysis publication lag; newest day never observed
+# Micro-baseline floor: a window expecting less rain than this cannot evidence a
+# drought, so its deficit is forced to 0%. Stops arid-season windows (expected
+# 0-2 mm) from paying 100% on a trivial absolute shortfall.
+MIN_INSURABLE_BASELINE_MM = 10
 POLICY_DAYS = 90
 EVAL_MIN_GAP = DAY  # minimum spacing between evaluations of one policy
 COOLDOWN = DAY  # approval -> first release
@@ -124,7 +133,10 @@ class PolicyRecord:
     start_ts: u256
     end_ts: u256
     claimed: bool
-    status: str  # ACTIVE | CLAIM_APPROVED | EXPIRED
+    status: str  # ACTIVE | CLAIM_APPROVED | SETTLED_NO_PAYOUT | EXPIRED
+    observation_start: u256  # first day of the 28-day window span, fixed at purchase
+    observation_end: u256  # last full day inside the term, fixed at purchase
+    matures_at: u256  # term end + reanalysis lag: the only moment a verdict may be taken
 
 
 @allow_storage
@@ -285,7 +297,11 @@ def _observe_source(source: str, url: str, windows, baselines_tenths):
             total = 0
             for i in range((w_end - w_start).days + 1):
                 total += series[(w_start + timedelta(days=i)).strftime("%Y-%m-%d")]
-            deficits.append(_deficit_pct(baselines_tenths[idx], total))
+            # Micro-baseline floor: an arid window cannot evidence a drought.
+            if baselines_tenths[idx] < MIN_INSURABLE_BASELINE_MM * 10:
+                deficits.append(0)
+            else:
+                deficits.append(_deficit_pct(baselines_tenths[idx], total))
         # Sustained deviation: the weakest window decides the source's verdict.
         sustained = min(deficits)
         return (_tier_for_deficit(sustained), sustained)
@@ -449,6 +465,9 @@ class AetherClaim(gl.contract.Contract):
             "end_ts": int(p.end_ts),
             "claimed": bool(p.claimed),
             "status": p.status,
+            "observation_start": int(p.observation_start),
+            "observation_end": int(p.observation_end),
+            "matures_at": int(p.matures_at),
         }
 
     def _releasable(self, pid: str, now: int) -> int:
@@ -478,6 +497,8 @@ class AetherClaim(gl.contract.Contract):
             "vesting_seconds": VESTING,
             "staging_delay_seconds": STAGING_DELAY,
             "min_deposit": str(MIN_DEPOSIT),
+            "min_insurable_baseline_mm": MIN_INSURABLE_BASELINE_MM,
+            "data_lag_days": DATA_LAG_DAYS,
             "exposure_cap_bounds": [str(MIN_EXPOSURE_CAP), str(MAX_EXPOSURE_CAP)],
             "policy_days": POLICY_DAYS,
             "epoch_seconds": EPOCH_SECONDS,
@@ -567,11 +588,18 @@ class AetherClaim(gl.contract.Contract):
         amount = int(gl.message.value)
         if amount < MIN_DEPOSIT:
             raise gl.vm.UserError(f"{ERR_EXPECTED} deposit below minimum")
+        # Accounting invariants. Both states are unreachable through the public
+        # API: a burn that empties the vault always takes the pool to exactly 0,
+        # and any surviving share keeps at least 1 wei of free capital. The guard
+        # fails closed if an invariant is ever broken, rather than minting shares
+        # against a value that no longer reconciles.
+        if self.total_lp_shares == 0 and self.pool_balance != 0:
+            raise gl.vm.UserError(f"{ERR_EXPECTED} vault accounting inconsistent: capital without shares")
+        if self.total_lp_shares > 0 and self.pool_balance == 0:
+            raise gl.vm.UserError(f"{ERR_EXPECTED} vault accounting inconsistent: shares without capital")
         if self.total_lp_shares == 0:
             shares = amount
         else:
-            if self.pool_balance == 0:
-                raise gl.vm.UserError(f"{ERR_EXPECTED} pool exhausted, deposits closed")
             shares = amount * int(self.total_lp_shares) // int(self.pool_balance)
         if shares <= 0:
             raise gl.vm.UserError(f"{ERR_EXPECTED} deposit mints zero shares")
@@ -598,6 +626,11 @@ class AetherClaim(gl.contract.Contract):
             raise gl.vm.UserError(f"{ERR_EXPECTED} exceeds your shares")
         total = int(self.total_lp_shares)
         pool = int(self.pool_balance)
+        # Orphan guard: the last LP cannot leave while policies are live. Burning
+        # every share would strand the reserved capital with no shareholder, so
+        # the next depositor would inherit it. Exits resume once liabilities clear.
+        if self.total_liabilities > 0 and total - burn == 0:
+            raise gl.vm.UserError(f"{ERR_EXPECTED} last LP cannot exit while policies are live")
         payout = burn * pool // total
         free = max(0, pool - int(self.total_liabilities))
         payout = min(payout, burn * free // total)
@@ -720,6 +753,13 @@ class AetherClaim(gl.contract.Contract):
         now = self._now()
         epoch = now // EPOCH_SECONDS
         ekey = str(epoch)
+        end_ts = now + POLICY_DAYS * DAY
+        # Observation windows are the FINAL 28 days of the term, fixed here at
+        # purchase. observation_end is the last full day inside the term. The
+        # verdict may only be taken once data for that day is published.
+        obs_end_ts = end_ts - end_ts % DAY - DAY
+        obs_start_ts = obs_end_ts - (WINDOW_DAYS * N_WINDOWS - 1) * DAY
+        matures_ts = end_ts + DATA_LAG_DAYS * DAY
         used = self.epoch_exposure.get(ekey, 0)
         if used + coverage > self.max_epoch_exposure:
             raise gl.vm.UserError(f"{ERR_EXPECTED} epoch exposure cap exceeded")
@@ -730,7 +770,6 @@ class AetherClaim(gl.contract.Contract):
 
         pid = f"P-{int(self.next_policy_id)}"
         self.next_policy_id += 1
-        end_ts = now + POLICY_DAYS * DAY
         self.policies[pid] = PolicyRecord(
             policyholder=gl.message.sender_address,
             plot_id=plot_id,
@@ -742,6 +781,9 @@ class AetherClaim(gl.contract.Contract):
             end_ts=end_ts,
             claimed=False,
             status="ACTIVE",
+            observation_start=obs_start_ts,
+            observation_end=obs_end_ts,
+            matures_at=matures_ts,
         )
         self.policy_ids.append(pid)
         return pid
@@ -762,36 +804,35 @@ class AetherClaim(gl.contract.Contract):
     # ----------------------------------------------------------------- claims
     @gl.public.write
     def evaluate_claim(self, policy_id: str) -> dict:
+        """European-style exercise. The verdict is taken only once the policy's
+        fixed observation windows have matured, so the caller cannot pick the day
+        to look at the weather. Windows come from the policy record, never from
+        the caller's clock. A settled outcome is final. INCONCLUSIVE leaves the
+        policy open for a retry, rate-limited to one attempt per EVAL_MIN_GAP."""
         if policy_id not in self.policies:
             raise gl.vm.UserError(f"{ERR_EXPECTED} unknown policy")
         pol = self.policies[policy_id]
         if pol.status != "ACTIVE" or pol.claimed:
             raise gl.vm.UserError(f"{ERR_EXPECTED} policy not claimable")
         now = self._now()
-        if now > pol.end_ts + EXPIRY_GRACE:
+        if now < int(pol.matures_at):
+            raise gl.vm.UserError(
+                f"{ERR_EXPECTED} TIMELOCK not matured: evaluation opens at {int(pol.matures_at)}"
+            )
+        if now > int(pol.end_ts) + EXPIRY_GRACE:
             raise gl.vm.UserError(f"{ERR_EXPECTED} policy expired")
         prior = self.claims.get(policy_id, None)
-        if prior is not None and now < prior.evaluated_at + EVAL_MIN_GAP:
+        if prior is not None and now < int(prior.evaluated_at) + EVAL_MIN_GAP:
             raise gl.vm.UserError(f"{ERR_EXPECTED} TIMELOCK evaluated too recently")
 
-        # Observation window: newest observable day is lagged and capped at
-        # policy end; the whole span must sit inside the coverage period.
-        today = datetime.fromtimestamp(now - now % DAY, tz=timezone.utc)
-        obs_end = today - timedelta(days=DATA_LAG_DAYS)
-        cap = datetime.fromtimestamp(int(pol.end_ts) - int(pol.end_ts) % DAY, tz=timezone.utc)
-        if obs_end > cap:
-            obs_end = cap
-        span_days = WINDOW_DAYS * N_WINDOWS
-        first_day = obs_end - timedelta(days=span_days - 1)
-        if int(first_day.timestamp()) < int(pol.start_ts) - int(pol.start_ts) % DAY + DAY:
-            raise gl.vm.UserError(f"{ERR_EXPECTED} TIMELOCK observation windows not yet inside coverage")
-
+        obs_end = datetime.fromtimestamp(int(pol.observation_end), tz=timezone.utc)
+        obs_start = datetime.fromtimestamp(int(pol.observation_start), tz=timezone.utc)
         plot = self.plots[pol.plot_id]
         lat, lon = int(plot.latitude_e4), int(plot.longitude_e4)
         monthly = _parse_baselines(plot.monthly_baselines_csv)
         windows = _window_bounds(obs_end)
         baselines_tenths = [_window_baseline_tenths(monthly, ws, we) for ws, we in windows]
-        urls = _source_urls(lat, lon, first_day, obs_end)
+        urls = _source_urls(lat, lon, obs_start, obs_end)
 
         def leader_fn():
             obs = [(n, _observe_source(n, u, windows, baselines_tenths)) for n, u in urls]
@@ -820,13 +861,12 @@ class AetherClaim(gl.contract.Contract):
 
         evals = (int(prior.evaluations) if prior is not None else 0) + 1
         payout = 0
-        outcome = TIER_LABEL[tier]
         if tier >= 1:
             payout = int(pol.coverage_amount) * TIER_PAYOUT_BPS[tier] // 10000
         approved = payout > 0
         self.claims[policy_id] = ClaimRecord(
             payout_tier=max(tier, 0),
-            outcome=outcome,
+            outcome=TIER_LABEL[tier],
             median_deficit=int(res["median_deficit"]),
             source_count=int(res["source_count"]),
             reasoning=_canonical_reasoning(tier, int(res["median_deficit"]), int(res["source_count"])),
@@ -837,12 +877,19 @@ class AetherClaim(gl.contract.Contract):
             evaluated_at=now,
             evaluations=evals,
         )
+        if tier == -1:
+            # INCONCLUSIVE: no quorum this time. Reserve stays, policy stays
+            # ACTIVE, and a later attempt may succeed once sources recover.
+            return self.get_claim(policy_id)
+        # Settled outcomes are final. Release the reserve in every case.
+        self.total_liabilities -= pol.coverage_amount
         if approved:
             pol.claimed = True
             pol.status = "CLAIM_APPROVED"
-            self.total_liabilities -= pol.coverage_amount
             self.pool_balance -= payout
             self.committed_payouts += payout
+        else:
+            pol.status = "SETTLED_NO_PAYOUT"
         return self.get_claim(policy_id)
 
     @gl.public.write

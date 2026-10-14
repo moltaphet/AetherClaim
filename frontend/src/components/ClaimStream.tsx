@@ -132,11 +132,19 @@ export default function ClaimStream({ refreshKey }: { refreshKey: number }) {
               {policy.status === "ACTIVE" && (
                 <button
                   className="btn"
-                  disabled={!!busy || !chainOk}
+                  disabled={!!busy || !chainOk || now < policy.matures_at}
                   onClick={() => act("evaluate_claim", policy.policy_id)}
+                  title="Evaluation opens only after the fixed observation windows have matured"
                 >
-                  {busy === policy.policy_id + "evaluate_claim" ? "Validators evaluating…" : "Trigger consensus check"}
+                  {busy === policy.policy_id + "evaluate_claim"
+                    ? "Validators evaluating…"
+                    : now < policy.matures_at
+                      ? `Opens ${new Date(policy.matures_at * 1000).toISOString().slice(0, 10)}`
+                      : "Trigger consensus check"}
                 </button>
+              )}
+              {policy.status === "SETTLED_NO_PAYOUT" && (
+                <span className="font-mono text-xs text-mist">settled · no payout · final</span>
               )}
               {approved > 0n && (
                 <button
