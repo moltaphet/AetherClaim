@@ -307,12 +307,65 @@ and leave the remaining LPs holding the loss. The cap means reserved capital nev
 leaves ahead of the claims it backs. `test_lp_share_fair_loss_distribution` proves
 the leaver and the stayer end with identical value.
 
-## 3. Verify
+## 3. Verification & Testing
+
+### 3a. Reproducing the 67 direct-mode contract tests
+
+The suite runs the contract in the **direct VM execution mode** of
+`genlayer-test` (gltest). The contract's Python executes in-process under the
+GenVM SDK, with **mocked HTTP adapters** (`direct_vm.mock_web`) standing in for
+the three weather sources, and `direct_vm.warp` for the block clock. That isolates
+the economic logic from testnet flakiness, including the Studio database-session
+errors that currently break `gen_call` reads. It also means the suite does not
+exercise a live validator network, real source data or the wallet.
+
+**Prerequisites**
+
+| Requirement | Value |
+|---|---|
+| Python | 3.12 (verified with 3.12.12) |
+| Test framework | `genlayer-test==0.30.0rc2` (pulls `genlayer-py` 0.19.0rc2 and `pytest`) |
+| GenVM runner | `GENVM_VERSION=v0.6.0-rc5`, set by default in `tests/conftest.py` |
+| Network | needed once, to download the runner bundle from GitHub releases |
+| Disk | the runner is cached under `~/.cache/gltest-direct` |
+
+The contract's pinned runner (`py-genlayer:5jycge…`) ships in the `v0.6.0-rc5`
+tree. Without that version, gltest resolves the *latest* GenVM release and the
+runner is not found, so the pin matters.
+
+**Commands** (verified from an empty cache and a fresh virtualenv: 67 passed in
+2m26s, almost all of it the one-time runner download. A warm cache runs in about
+5 s.)
 
 ```bash
-# contract tests (67 direct-mode tests: lifecycle, adversarial, sweep, audit regressions)
-python -m pytest tests/test_aether_claim.py -v   # needs genlayer-test (gltest); pins GENVM_VERSION in tests/conftest.py
+# 1. virtualenv on Python 3.12
+uv venv --python 3.12 .venv
 
+# 2. install gltest. genlayer-py is a pre-release, so uv needs the flag
+uv pip install --python .venv/bin/python --prerelease=allow -r requirements-dev.txt
+
+# 3. run the suite (GENVM_VERSION defaults to v0.6.0-rc5 via tests/conftest.py)
+.venv/bin/python -m pytest tests/test_aether_claim.py -v
+
+# equivalent, with the activated environment
+source .venv/bin/activate
+python -m pytest tests/test_aether_claim.py -v
+```
+
+To set the runner version explicitly: `GENVM_VERSION=v0.6.0-rc5 python -m pytest tests/test_aether_claim.py -v`.
+
+Notes:
+- With plain `pip`, `pip install -r requirements-dev.txt` should resolve the
+  pre-release dependency on its own, but the `pip` and stdlib-`venv` route was
+  **not** verified on this machine (its Python 3.12 is a `uv` build without
+  `ensurepip`).
+- A `HTTP Error 403: rate limit exceeded` warning while resolving the latest
+  GenVM version is harmless: the pinned version is used.
+- Use Python 3.12. The suite was not run on the system Python 3.14.
+
+### 3b. Other checks
+
+```bash
 # deploy (CLI already configured with a funded account)
 genlayer network set studio-next
 genlayer deploy              # runs deploy/deploy_aether_claim.ts
@@ -323,7 +376,7 @@ genlayer call 0x520928106203cb618A92841B1fD0A69978fE6Dc5 get_pool
 genlayer call 0x520928106203cb618A92841B1fD0A69978fE6Dc5 get_config
 
 # frontend
-cd frontend && npm install && npm run dev
+cd frontend && npm install && npm run build && npm run dev
 ```
 
 ## 4. Insurable calendar: Central Valley (Almond / winter crop)
@@ -409,14 +462,32 @@ transaction is built. Weather fetches use a 6 s abort timeout, and a station
 that returns a null, missing or negative day is marked `DATA_ERROR` and excluded
 from the quorum view rather than read as 0 mm.
 
-**Dependency audit.** `npm audit` reports 6 findings (1 critical, 5 high), all in
-`next` 14.2.35 itself. `package.json` `overrides` pin `postcss` to 8.5.30 and
-`postcss-selector-parser` to 7.1.6, which cleared the postcss findings. The build
-output is byte-identical before and after. The remaining `next` findings have no
-fix inside Next 14. The fix is a breaking major upgrade, which was not applied
-unreviewed. The app is client-rendered and uses no `next/image`, middleware,
-rewrites or CSP nonces, and the image optimizer is disabled in `next.config.mjs`.
-For a production deployment, serve it as a static export or upgrade Next.js.
+**Dependency audit.** `npm audit` reports 6 findings: 1 critical and 5 high.
+None can be resolved without a breaking major upgrade. Only `next` is a
+runtime dependency. The other five are build-time tooling.
+
+| Package | Severity | Kind | Why it is still flagged |
+|---|---|---|---|
+| `next` 14.2.35 | critical | direct, runtime | 23 advisories (2 critical, 8 high, 11 moderate, 2 low): RCE in the image optimizer with AVIF, DoS in Server Components and Server Actions, SSRF in rewrites, cache poisoning. Fixed only in Next 16 |
+| `tailwindcss` 3.4.19 | high | direct, **devDependency** | flagged through the three packages below. Fixed only in Tailwind 4 |
+| `chokidar` 3.6.0 | high | transitive of tailwindcss | depends on `braces` |
+| `micromatch` 4.0.8 | high | transitive of tailwindcss | depends on `braces` |
+| `fast-glob` 3.3.3 | high | transitive of tailwindcss | depends on `micromatch` |
+| `braces` 3.0.3 | high | transitive of tailwindcss | the root cause: stack exhaustion on deeply nested glob patterns |
+
+The glob chain is **not fixable with `overrides`**: `braces`, `micromatch` and
+`fast-glob` are already at their latest releases, and the advisory range for
+`braces` and `fast-glob` is `*`, so no patched version exists to pin. It is
+build-time only and its input is Tailwind's own fixed `content` globs.
+
+`package.json` `overrides` do pin `postcss` to 8.5.30 and
+`postcss-selector-parser` to 7.1.6, which cleared the earlier postcss findings
+(9 findings became 6). The built CSS is byte-identical before and after.
+
+For the `next` findings: the app is client-rendered and uses no `next/image`,
+middleware, rewrites, Server Actions or CSP nonces, and the image optimizer is
+disabled in `next.config.mjs`. For a production deployment, serve it as a static
+export or upgrade Next.js.
 
 **Numeric parity.** The frontend's telemetry preview uses the contract's exact
 arithmetic: per-day rainfall to tenths with round-half-to-even (Python's `round`,

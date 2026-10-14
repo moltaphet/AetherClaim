@@ -1,0 +1,2 @@
+# Contract test environment. Python 3.12. See README section 3.
+genlayer-test==0.30.0rc2
