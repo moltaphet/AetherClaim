@@ -2,6 +2,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { api, ATTO, fromAtto, GENESIS_PLOTS, GENESIS_POOL, PREMIUM_BPS, Plot, Pool, TIERS, toAtto, writeCall } from "@/lib/contract";
 import SyncBadge from "./SyncBadge";
+import WalletSimNote from "./WalletSimNote";
 import { useWallet } from "@/lib/useAether";
 
 export default function PolicyVault({ plotId, onChange }: { plotId: string | null; onChange: () => void }) {
@@ -94,6 +95,7 @@ export default function PolicyVault({ plotId, onChange }: { plotId: string | nul
         <button className="btn btn-solid mt-6 w-full" disabled={busy || cov <= 0n || (!!account && !chainOk)} onClick={buy}>
           {!account ? "Connect wallet to buy" : busy ? "Awaiting consensus…" : `Pay ${fromAtto(premium, 5)} GEN premium`}
         </button>
+        <WalletSimNote />
         {msg && <p className={`mt-3 text-sm ${msg.ok ? "text-sprout" : "text-rust"}`}>{msg.text}</p>}
         <p className="mt-4 text-xs text-mist">
           Observation windows must fall inside your coverage period — a policy bought after a drought cannot

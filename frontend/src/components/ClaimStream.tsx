@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api, Claim, fromAtto, Policy, TIERS, writeCall } from "@/lib/contract";
 import { useWallet } from "@/lib/useAether";
 import SyncBadge from "./SyncBadge";
+import WalletSimNote from "./WalletSimNote";
 
 export default function ClaimStream({ refreshKey }: { refreshKey: number }) {
   const { account, chainOk, connect } = useWallet();
@@ -146,6 +147,7 @@ export default function ClaimStream({ refreshKey }: { refreshKey: number }) {
                   Release {claim ? fromAtto(claim.releasable, 4) : "0"} GEN
                 </button>
               )}
+              <WalletSimNote />
             </footer>
           </article>
         );

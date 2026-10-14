@@ -119,8 +119,11 @@ deployments/                   ABI schema + deployment record
 frontend/                      Next.js 14 + Tailwind dapp
 ```
 
-Frontend notes: transactions pass `gas: 0x7a120` (500000) and EIP-1559 fee
-fields via a provider wrapper (`withGasOverrides`) and a fee preset from
-`estimateTransactionFees`; reads race the primary RPC against a 9s timeout and
-fall back to the second RPC. Wallet-side behaviour was not exercised against a
-live MetaMask in this build.
+Frontend notes: writes go through the injected EIP-1193 provider into the
+official `genlayer-js` client. Before each write the fee deposit comes from
+`estimateTransactionFeesForWrite` (falling back to `estimateTransactionFees`,
+never a zero deposit) and the gas limit from `estimateTransactionGas`; nothing
+is hardcoded. MetaMask may still show its own EVM simulation warning on Studio
+Next — it is independent of GenLayer protocol fees. Reads race the two RPCs
+under a 5s limit and fall back to the genesis registry. Wallet-side behaviour
+was not exercised against a live MetaMask in this build.

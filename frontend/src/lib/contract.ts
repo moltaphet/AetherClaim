@@ -14,9 +14,6 @@ export const RPC_URLS = [
 export const EXPLORER = "https://explorer-studio-next.genlayer.com";
 
 export const READ_TIMEOUT_MS = 5000; // hard ceiling per read, across both RPCs
-export const TX_GAS_LIMIT = 500000; // explicit, so MetaMask never simulates GenVM
-export const TX_GAS_LIMIT_HEX = "0x" + TX_GAS_LIMIT.toString(16);
-export const TX_FEE_HEX = "0x3b9aca00"; // 1 gwei max fee & priority fee
 
 export const ATTO = 10n ** 18n;
 export const PREMIUM_BPS = 800n;
@@ -166,20 +163,31 @@ export function injected(): Eip1193 | undefined {
 }
 
 /**
- * Wraps the injected provider so every eth_sendTransaction carries an explicit
- * gas limit and EIP-1559 fee fields. MetaMask then skips its own estimation,
- * which cannot simulate GenVM and would otherwise flag the transaction.
+ * Wraps the injected provider so each eth_sendTransaction envelope carries a gas
+ * limit derived by the GenLayer SDK (`estimateTransactionGas`) for that exact
+ * transaction. Nothing is hardcoded: if the SDK cannot estimate, the field is
+ * left unset and the wallet sizes it itself.
  */
-export function withGasOverrides(p: Eip1193): Eip1193 {
+export function withSdkGasEstimation(p: Eip1193, getClient: () => AnyClient | undefined): Eip1193 {
   return {
     ...p,
-    request: (a) => {
+    request: async (a) => {
       if (a.method === "eth_sendTransaction" && a.params?.[0]) {
-        const tx = { ...(a.params[0] as Record<string, unknown>) };
-        tx.gas = TX_GAS_LIMIT_HEX;
-        delete tx.gasPrice;
-        tx.maxFeePerGas = TX_FEE_HEX;
-        tx.maxPriorityFeePerGas = TX_FEE_HEX;
+        const tx = { ...(a.params[0] as Record<string, any>) };
+        const client = getClient();
+        if (client?.estimateTransactionGas && tx.gas === undefined) {
+          try {
+            const gas = (await client.estimateTransactionGas({
+              from: tx.from,
+              to: tx.to,
+              data: tx.data,
+              value: tx.value ? BigInt(tx.value) : undefined,
+            })) as bigint;
+            tx.gas = "0x" + gas.toString(16);
+          } catch {
+            /* leave to the wallet */
+          }
+        }
         return p.request({ ...a, params: [tx, ...a.params.slice(1)] });
       }
       return p.request(a);
@@ -226,20 +234,30 @@ export async function writeCall(
   const p = injected();
   if (!p) throw new Error("No wallet detected");
   await ensureChain(p);
-  const client = await buildClient(RPC_URLS[0], account, withGasOverrides(p));
-  let fees: unknown;
-  if (typeof client.estimateTransactionFees === "function") {
-    // Studio Next has no FeeManager; an absent preset becomes a zero deposit,
-    // which the chain rejects. Derive it from the live policy instead.
-    fees = await withTimeout(client.estimateTransactionFees({}), READ_TIMEOUT_MS, "estimateTransactionFees");
+
+  // Injected EIP-1193 provider -> official GenLayer client. The wrapper fills
+  // `gas` from the SDK's own estimate; the client is looked up lazily because
+  // it is constructed with the wrapped provider.
+  let client: AnyClient | undefined;
+  client = await buildClient(RPC_URLS[0], account, withSdkGasEstimation(p, () => client));
+
+  // Protocol fee deposit: derived from the live fee policy and a write
+  // simulation of this exact call. If the simulation path is unavailable, use
+  // the policy-only estimate; never dispatch with an implied zero deposit.
+  const target = { address: CONTRACT_ADDRESS, functionName, args, value };
+  let estimate: { distribution: unknown; messageAllocations?: unknown; feeValue: bigint };
+  try {
+    estimate = await withTimeout(client.estimateTransactionFeesForWrite(target), 15000, "estimateTransactionFeesForWrite");
+  } catch {
+    estimate = await withTimeout(client.estimateTransactionFees({}), READ_TIMEOUT_MS, "estimateTransactionFees");
   }
-  const hash = (await client.writeContract({
-    address: CONTRACT_ADDRESS,
-    functionName,
-    args,
-    value,
-    fees,
-  })) as string;
+  const fees = {
+    distribution: estimate.distribution,
+    messageAllocations: estimate.messageAllocations,
+    feeValue: estimate.feeValue,
+  };
+
+  const hash = (await client.writeContract({ ...target, fees })) as string;
   const receipt = (await client.waitForTransactionReceipt({
     hash,
     waitUntil: "decided",
