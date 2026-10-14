@@ -9,12 +9,12 @@ observed rainfall.
 |---|---|
 | Network | GenLayer Studio Next, chain `61997` |
 | RPC | `https://studio-next.genlayer.com/api` (fallback `studio-dev.genlayer.com/api`) |
-| Contract | `0xfCFC35A4eedc8258e72c65877F5d66bc5Ac3C419` |
-| Explorer | https://explorer-studio-next.genlayer.com/address/0xfCFC35A4eedc8258e72c65877F5d66bc5Ac3C419 |
+| Contract | `0xd9FA0538b5888dAD4635263D399d5b02bf2294DD` |
+| Explorer | https://explorer-studio-next.genlayer.com/address/0xd9FA0538b5888dAD4635263D399d5b02bf2294DD |
 
-> **Deployment status (honest note).** This is the **round-6** build: two-source
-> degraded settlement is restricted to the policyholder, and a third party's
-> degraded call writes no state. It is deployed to Studio Next with the 0.5 GEN liquidity seed accepted
+> **Deployment status (honest note).** This is the **round-7** build: validators
+> now compare `tier`, `source_count` and `median_deficit` exactly, closing a
+> forged-`source_count` bypass of the policyholder-only guard. It is deployed to Studio Next with the 0.5 GEN liquidity seed accepted
 > (`deployments/studio-next.json`). The served schema matches
 > `deployments/aether_claim_abi.json` (19 methods, identical name set). Studio's
 > `gen_call` read endpoint has been failing server-side (`Can't reconnect until
@@ -33,7 +33,7 @@ observed rainfall.
             │                      ▼                                          │
             │   leader: 3 sources → per-source tier (lower of 2 windows)       │
             │           → aggregate: median of 3, lower of 2 → {tier, ...}     │
-            │   validators: re-run, require EXACT tier equality                │
+            │   validators: re-run, require EXACT tier/count/deficit match    │
  Anyone ───▶│ release_payout   24h cooldown → 3-day linear vesting → holder    │
             └──────────────────────────────────────────────────────────────────┘
    Open-Meteo ERA5 archive ── Open-Meteo GFS (NOAA model) ── NASA POWER
@@ -119,6 +119,17 @@ tier and the validator function requires `leader.tier == validator.tier`
 exactly. The payout is `coverage × {0, 3000, 7000, 10000} / 10000`, so any two
 validators that accept move identical money. Borderline cases (49% vs 50%
 deficit) are *rejected*, not averaged (`test_economic_drift_rejected_by_validator`).
+
+**What validators compare.** The leader's payload and the validator's own run must
+match on `tier`, `source_count` **and** `median_deficit`, and the payload must
+carry exactly the four expected keys with integer types (checked before any
+cast). `source_count` is load-bearing: it decides whether a degraded result may be
+settled by a third party. Comparing tier alone let a leader forge
+`source_count: 3` on a two-source result and bypass the policyholder-only guard
+(`test_validator_rejects_forged_source_count_payload`). The cost is liveness:
+validators must see the same sources and the same deficit, so numeric noise
+inside one tier (5.0 mm against 5.4 mm) now produces a disagreement and a
+rotation rather than agreement (`test_validator_accepts_identical_readings_and_rejects_value_drift`).
 The reasoning string is deterministic code output, not LLM prose.
 
 **Self-attack / moral hazard (PulseSLA flaw).**
@@ -247,6 +258,7 @@ is about how the realised payout tracks the risk the premium priced:
 | 15 (round 5) | Docstrings did not state the timing assumptions for quorum retries | `evaluate_claim` and `_corroborate` now state the assumptions: fixed windows, one final settlement, retry only on outage, monotone availability, and the data-stability assumption |
 | 16 (round 6) | Any caller could settle a two-source result at `min(a, b)` during a one-source outage, locking the insured into a lower tier and removing their retry | Two-source (degraded) settlement is **policyholder-only**. Others get `QUORUM_FAILURE` and no state is written, so they cannot lock a tier or consume the retry rate limit. Three-source settlement stays permissionless. Regression: `test_third_party_cannot_force_lower_tier_settlement_on_outage`, `test_three_sources_settle_permissionlessly_at_median`, `test_policyholder_can_voluntarily_accept_degraded_two_source_settlement`, `test_third_party_outage_attempt_does_not_block_policyholder_retry` |
 
+| 17 (round 7) | Validators compared tier only, so a leader could forge `source_count: 3` on a two-source result and let a third party settle a degraded tier | Validators compare `tier`, `source_count` and `median_deficit` exactly, and require exactly the four payload keys. Regression: `test_validator_rejects_forged_source_count_payload` |
 **Deliberate deviation from the plain ERC-4626 formula.** A withdrawal pays
 `min(shares × pool / total_shares, shares × (pool − reserved) / total_shares)`.
 With only the first term, an LP could exit while a claim is still unrecognised
@@ -257,7 +269,7 @@ the leaver and the stayer end with identical value.
 ## 3. Verify
 
 ```bash
-# contract tests (66 direct-mode tests: lifecycle, adversarial, sweep, audit regressions)
+# contract tests (67 direct-mode tests: lifecycle, adversarial, sweep, audit regressions)
 python -m pytest tests/test_aether_claim.py -v   # needs genlayer-test (gltest); pins GENVM_VERSION in tests/conftest.py
 
 # deploy (CLI already configured with a funded account)
@@ -265,9 +277,9 @@ genlayer network set studio-next
 genlayer deploy              # runs deploy/deploy_aether_claim.ts
 
 # read checks (currently failing on Studio; see the deployment note)
-genlayer call 0xfCFC35A4eedc8258e72c65877F5d66bc5Ac3C419 list_plots
-genlayer call 0xfCFC35A4eedc8258e72c65877F5d66bc5Ac3C419 get_pool
-genlayer call 0xfCFC35A4eedc8258e72c65877F5d66bc5Ac3C419 get_config
+genlayer call 0xd9FA0538b5888dAD4635263D399d5b02bf2294DD list_plots
+genlayer call 0xd9FA0538b5888dAD4635263D399d5b02bf2294DD get_pool
+genlayer call 0xd9FA0538b5888dAD4635263D399d5b02bf2294DD get_config
 
 # frontend
 cd frontend && npm install && npm run dev

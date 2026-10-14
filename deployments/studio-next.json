@@ -2,8 +2,8 @@
   "network": "GenLayer Studio Next",
   "chainId": 61997,
   "rpc": "https://studio-next.genlayer.com/api",
-  "address": "0xfCFC35A4eedc8258e72c65877F5d66bc5Ac3C419",
-  "deployTx": "0x115d1b6f00bc44b4954a2cdb621ba6e00f0c48f6df328b2f87247cad347ded3b",
-  "deployedAt": "2026-10-14T08:00:37.171Z",
-  "seedLiquidityTx": "0x98b1d22a798ac89d4bebdd5169536eddb90bf6b92d05756666de08ea9a0b12ba"
+  "address": "0xd9FA0538b5888dAD4635263D399d5b02bf2294DD",
+  "deployTx": "0x6b988ed2a000f185d2f0d5be940849bd3173574e7b0b1bd2c57b937f48f8c584",
+  "deployedAt": "2026-10-14T08:07:56.407Z",
+  "seedLiquidityTx": "0x1176811a6187e61c44af5674395f666ca0eac193de60e6b982ff776cb73ec6d3"
 }

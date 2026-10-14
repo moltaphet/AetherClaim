@@ -377,14 +377,20 @@ class TestAdversarialProtection:
         uniform(env.vm, 7.1)
         assert env.vm.run_validator() is False
 
-    def test_validator_accepts_same_tier_despite_value_noise(self, env):
+    def test_validator_accepts_identical_readings_and_rejects_value_drift(self, env):
+        """Validators compare tier, source_count and median_deficit exactly. The
+        same readings agree. A reading that moves the deficit inside the same tier
+        (5.0 mm is 64%, 5.4 mm is 61%) is a different payload and is rejected, even
+        though the payout would be identical. That is the price of committing the
+        fields the contract acts on."""
         pid = buy(env.c, env.vm, env.farmer)
         warp_to(env.vm, MATURITY + timedelta(hours=3))
         uniform(env.vm, TIER2)
         env.vm.sender = env.farmer
         env.c.evaluate_claim(pid)
-        uniform(env.vm, 5.4)  # different reading, same bucket
-        assert env.vm.run_validator() is True
+        assert env.vm.run_validator() is True  # same readings
+        uniform(env.vm, 5.4)  # same tier, different deficit
+        assert env.vm.run_validator() is False
 
     def test_validator_rejects_leader_error(self, env):
         pid = buy(env.c, env.vm, env.farmer)
@@ -785,6 +791,25 @@ class TestAuditRegressions:
         assert env.vm.run_validator(leader_result={"tier": 0, "median_deficit": 0, "source_count": 3, "reasoning": "x"}) is False
         relabelled = {"tier": -2, "median_deficit": 0, "source_count": 1, "reasoning": "x"}
         assert env.vm.run_validator(leader_result=relabelled) is False
+
+    def test_validator_rejects_forged_source_count_payload(self, env):
+        """Audit PoC (commit ab52505). Only two sources answer (tier 1). A leader
+        forges source_count 3 with the agreeing tier to bypass the policyholder-only
+        degraded-settlement guard. Tier equality alone accepted it. The validator
+        must now compare source_count and median_deficit as well."""
+        pid = buy(env.c, env.vm, env.farmer)
+        warp_to(env.vm, MATURITY + timedelta(hours=3))
+        mock_sources(env.vm, (TIER1, TIER1), gfs=None, nasa=(TIER3, TIER3))
+        env.vm.sender = env.farmer
+        claim = env.c.evaluate_claim(pid)
+        assert claim["payout_tier"] == 1 and claim["source_count"] == 2
+        honest = {"tier": 1, "median_deficit": 28, "source_count": 2, "reasoning": "x"}
+        assert env.vm.run_validator(leader_result=honest) is True
+        forged = {**honest, "source_count": 3}  # tier matches, count is a lie
+        assert env.vm.run_validator(leader_result=forged) is False
+        assert env.vm.run_validator(leader_result={**honest, "median_deficit": 29}) is False
+        assert env.vm.run_validator(leader_result={**honest, "median_deficit": 85}) is False
+        assert env.vm.run_validator(leader_result={**honest, "extra": 1}) is False
 
     def test_stored_reasoning_is_canonical_not_leader_text(self, env):
         _, claim = claim_with(env, TIER2)

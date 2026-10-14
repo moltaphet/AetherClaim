@@ -341,9 +341,9 @@ def _payload_ok(obj) -> bool:
     anything is written to storage."""
     if not isinstance(obj, dict):
         return False
-    for key in ("tier", "median_deficit", "source_count", "reasoning"):
-        if key not in obj:
-            return False
+    # Exactly the four expected keys, so nothing unexpected is carried through.
+    if set(obj.keys()) != {"tier", "median_deficit", "source_count", "reasoning"}:
+        return False
     tier, med, cnt, why = obj["tier"], obj["median_deficit"], obj["source_count"], obj["reasoning"]
     for v in (tier, med, cnt):
         if isinstance(v, bool) or not isinstance(v, int):
@@ -915,8 +915,16 @@ class AetherClaim(gl.contract.Contract):
             mine = leader_fn()
             if not _payload_ok(mine):
                 return False
-            # EXACT equality of the aggregated tier, including the -2 outage code.
-            return int(theirs["tier"]) == int(mine["tier"])
+            # EXACT equality of everything the contract acts on. source_count
+            # decides who may settle (degraded two-source results are
+            # policyholder-only), so a leader must not be able to claim three
+            # answering sources when only two did. Structure and int types were
+            # checked by _payload_ok above, before any cast.
+            return (
+                int(theirs["tier"]) == int(mine["tier"])
+                and int(theirs["source_count"]) == int(mine["source_count"])
+                and int(theirs["median_deficit"]) == int(mine["median_deficit"])
+            )
 
         res = gl.vm.run_nondet(leader_fn, validator_fn)
         if not _payload_ok(res):

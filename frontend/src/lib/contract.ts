@@ -4,7 +4,7 @@
 export const CHAIN_ID = 61997;
 export const CHAIN_ID_HEX = "0xf22d";
 export const CONTRACT_ADDRESS =
-  process.env.NEXT_PUBLIC_AETHER_CLAIM_ADDRESS ?? "0xfCFC35A4eedc8258e72c65877F5d66bc5Ac3C419";
+  process.env.NEXT_PUBLIC_AETHER_CLAIM_ADDRESS ?? "0xd9FA0538b5888dAD4635263D399d5b02bf2294DD";
 
 // Primary first, fallback second. Both serve chain 61997.
 export const RPC_URLS = [
