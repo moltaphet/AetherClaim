@@ -103,7 +103,7 @@ export default function ClaimStream({ refreshKey }: { refreshKey: number }) {
                 <Cell k="Validator agreement" v={`${claim.source_count}/3 sources`} />
                 <Cell k="Median deficit" v={`${claim.median_deficit}%`} />
                 <Cell k="Approved" v={`${fromAtto(approved, 4)} GEN`} />
-                <p className="font-mono text-[11px] text-wheat sm:col-span-4">{outcomeNote(claim.outcome)}</p>
+                <p className="font-mono text-[11px] text-wheat sm:col-span-4">{outcomeNote(claim.outcome, claim.source_count)}</p>
                 <p className="font-mono text-[11px] text-mist sm:col-span-4">{claim.reasoning}</p>
               </div>
             )}

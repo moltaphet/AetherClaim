@@ -4,6 +4,7 @@ Run: python -m pytest tests/test_aether_claim.py -v
 """
 
 from datetime import datetime, timedelta, timezone
+from itertools import product
 
 import pytest
 
@@ -132,7 +133,7 @@ class TestLifecycle:
         assert claim["source_count"] == 3
         assert int(claim["approved_payout"]) == 10 * ATTO * bps // 10000
         pol = env.c.get_policy(pid)
-        assert pol["claimed"] is True and pol["status"] == "CLAIM_APPROVED"
+        assert pol["claimed"] is True and pol["status"] == "SETTLED_PAYOUT"
         assert int(env.c.get_pool()["committed_payouts"]) == int(claim["approved_payout"])
 
     def test_normal_rainfall_settles_final_and_releases_reserve(self, env):
@@ -182,11 +183,12 @@ class TestLifecycle:
         env.vm.sender = env.farmer
         assert env.c.evaluate_claim(pid)["payout_tier"] == 3
 
-    def test_grace_and_retry_hold_constants(self, env):
+    def test_grace_and_aggregation_config(self, env):
         cfg = env.c.get_config()
         assert cfg["expiry_grace_days"] == 30
-        assert cfg["retry_hold_days"] == 14
+        assert cfg["quorum_min_sources"] == 2
         assert cfg["min_insurable_baseline_mm"] == 10
+        assert "retry_hold_days" not in cfg  # no hold: grace is the only retry window
 
 
 # ----------------------------------------------------------------- adversarial
@@ -210,23 +212,71 @@ class TestAdversarialProtection:
         with env.vm.expect_revert("only admin"):
             env.c.stage_plot("EVIL", "x", "x", 0, 0, FLAT, "c" * 64, 1, 12)
 
-    def test_single_source_fault_is_final_and_cannot_be_waited_out(self, env):
-        """One station reports 0 mm while two report normal rain. The split is a
-        final no-payout. A later outage of the dissenting source must not flip it."""
+    def test_single_station_fault_cannot_trigger_payout(self, env):
+        """One station reports 0 mm (tier 3) while two report normal rain. The
+        median is tier 0, so the isolated reading cannot pay anything."""
         pid = buy(env.c, env.vm, env.farmer)
         warp_to(env.vm, MATURITY + timedelta(hours=3))
         mock_sources(env.vm, (0.0, 0.0), gfs=(NORMAL, NORMAL), nasa=(NORMAL, NORMAL))
         env.vm.sender = env.farmer
         claim = env.c.evaluate_claim(pid)
-        assert claim["outcome"] == "INCONCLUSIVE_DISAGREE"
-        assert claim["approved_payout"] == "0"
+        assert claim["outcome"] == "NORMAL" and claim["approved_payout"] == "0"
         assert env.c.get_policy(pid)["status"] == "SETTLED_NO_PAYOUT"
-        # The dissenter goes down, and the two remaining sources read a breach.
-        # The policyholder must not get a second verdict.
         warp_to(env.vm, MATURITY + timedelta(days=2))
-        mock_sources(env.vm, (TIER3, TIER3), gfs=None, nasa=(TIER3, TIER3))
+        mock_sources(env.vm, (TIER3, TIER3), gfs=(TIER3, TIER3), nasa=(TIER3, TIER3))
         with env.vm.expect_revert("not claimable"):
-            env.c.evaluate_claim(pid)
+            env.c.evaluate_claim(pid)  # settled is final: no second look
+
+    def test_source_disagreement_settles_at_conservative_lower_tier(self, env):
+        """Audit PoC. Open-Meteo (ERA5) reads Tier 3, NASA POWER reads Tier 1, and
+        the GFS leg is down. Two sources answer, so the lower tier settles: Tier 1
+        (30%), deterministically. It does not settle at 0, and it does not pay 100%."""
+        pid = buy(env.c, env.vm, env.farmer)
+        warp_to(env.vm, MATURITY + timedelta(hours=3))
+        mock_sources(env.vm, (TIER3, TIER3), gfs=None, nasa=(TIER1, TIER1))
+        env.vm.sender = env.farmer
+        claim = env.c.evaluate_claim(pid)
+        assert claim["payout_tier"] == 1 and claim["outcome"] == "MODERATE_DROUGHT"
+        assert claim["source_count"] == 2
+        assert int(claim["approved_payout"]) == 3 * ATTO  # 30% of 10 GEN
+        assert claim["reasoning"].startswith("2 sources answered: conservative floor tier 1")
+        pol = env.c.get_policy(pid)
+        assert pol["status"] == "SETTLED_PAYOUT" and pol["claimed"] is True
+        # Determinism: a validator that re-reads the same sources agrees.
+        assert env.vm.run_validator() is True
+
+    def test_three_source_split_settles_at_median(self, env):
+        """All three answer: Tier 3, Tier 1, Tier 1. The median is Tier 1."""
+        pid = buy(env.c, env.vm, env.farmer)
+        warp_to(env.vm, MATURITY + timedelta(hours=3))
+        mock_sources(env.vm, (TIER3, TIER3), gfs=(TIER1, TIER1), nasa=(TIER1, TIER1))
+        env.vm.sender = env.farmer
+        claim = env.c.evaluate_claim(pid)
+        assert claim["payout_tier"] == 1 and claim["source_count"] == 3
+        assert claim["reasoning"].startswith("3 sources answered: median tier 1")
+
+    def test_single_low_outlier_is_outvoted(self, env):
+        """Two sources read Tier 3, one reads normal rain. The median is Tier 3, so
+        one faulty low reading cannot wipe out a drought that two sources see.
+        Note that the two Open-Meteo legs count as two votes (see README)."""
+        pid = buy(env.c, env.vm, env.farmer)
+        warp_to(env.vm, MATURITY + timedelta(hours=3))
+        mock_sources(env.vm, (TIER3, TIER3), gfs=(TIER3, TIER3), nasa=(NORMAL, NORMAL))
+        env.vm.sender = env.farmer
+        claim = env.c.evaluate_claim(pid)
+        assert claim["payout_tier"] == 3 and int(claim["approved_payout"]) == 10 * ATTO
+
+    def test_two_source_split_settles_at_lower_reading_even_if_zero(self, env):
+        """Documented limitation. With only two sources answering, the lower reading
+        governs, so one normal-rain reading can settle a drought at zero. The
+        three-source median does not have this weakness."""
+        pid = buy(env.c, env.vm, env.farmer)
+        warp_to(env.vm, MATURITY + timedelta(hours=3))
+        mock_sources(env.vm, (TIER3, TIER3), gfs=(NORMAL, NORMAL), nasa=None)
+        env.vm.sender = env.farmer
+        claim = env.c.evaluate_claim(pid)
+        assert claim["payout_tier"] == 0 and claim["approved_payout"] == "0"
+        assert env.c.get_policy(pid)["status"] == "SETTLED_NO_PAYOUT"
 
     def test_too_few_sources_is_quorum_failure_and_retryable(self, env):
         pid = buy(env.c, env.vm, env.farmer)
@@ -234,7 +284,7 @@ class TestAdversarialProtection:
         mock_sources(env.vm, (TIER3, TIER3), gfs=None, nasa=None)
         env.vm.sender = env.farmer
         claim = env.c.evaluate_claim(pid)
-        assert claim["outcome"] == "INCONCLUSIVE_QUORUM" and claim["source_count"] == 1
+        assert claim["outcome"] == "QUORUM_FAILURE" and claim["source_count"] == 1
         assert env.c.get_policy(pid)["status"] == "ACTIVE"  # still open for a retry
 
     def test_two_of_three_sources_can_settle(self, env):
@@ -323,20 +373,74 @@ class TestAdversarialProtection:
         with env.vm.expect_revert("expired"):
             env.c.evaluate_claim(pid)
 
-    def test_outage_retry_window_survives_until_day_thirty(self, env):
-        """A policyholder whose sources were down keeps the claim open for a retry
-        until the 30-day grace ends. Expiry then waits 14 days after the last try."""
+    def test_availability_cannot_raise_payout(self, env):
+        """Exhaustive sweep. Every combination of tiers at the three sources, and
+        every pattern of which sources answer. For each, the contract's aggregate
+        must equal the independent oracle, and the oracle must never rise above the
+        all-three median when a source drops out. Sources drop out at random, so
+        this rules out gaming availability."""
+        pid = buy(env.c, env.vm, env.farmer)
+        warp_to(env.vm, MATURITY + timedelta(hours=3))
+        uniform(env.vm, NORMAL)
+        env.vm.sender = env.farmer
+        env.c.evaluate_claim(pid)  # captures the validator for this policy's fixed windows
+
+        mm_for = {0: NORMAL, 1: TIER1, 2: TIER2, 3: TIER3}
+        deficit_for = {0: 0, 1: 28, 2: 64, 3: 85}  # sustained deficit for each tier mm
+        pair = lambda mm: (mm, mm) if mm is not None else None  # noqa: E731
+
+        def oracle(tiers, mask):
+            answered = [t for t, m in zip(tiers, mask) if m]
+            if len(answered) < 2:
+                return -2, 0
+            k = 1 if len(answered) == 3 else 0
+            tier = sorted(answered)[k]
+            med = sorted(deficit_for[t] for t in answered)[k]
+            return tier, med
+
+        checked = 0
+        for tiers in product(range(4), repeat=3):
+            full_tier, _ = oracle(tiers, (True, True, True))
+            for mask in product([True, False], repeat=3):
+                mms = [mm_for[t] if m else None for t, m in zip(tiers, mask)]
+                mock_sources(env.vm, pair(mms[0]), gfs=pair(mms[1]), nasa=pair(mms[2]))
+                tier, med = oracle(tiers, mask)
+                assert tier <= full_tier or tier == -2, (tiers, mask)  # never above the median
+                count = sum(mask)
+                payload = {"tier": tier, "median_deficit": med, "source_count": count, "reasoning": "x"}
+                assert env.vm.run_validator(leader_result=payload) is True, (tiers, mask)
+                if 0 <= tier <= 2:  # the contract compares tiers exactly
+                    higher = {**payload, "tier": tier + 1, "median_deficit": deficit_for[tier + 1]}
+                    assert env.vm.run_validator(leader_result=higher) is False, (tiers, mask)
+                checked += 1
+        assert checked == 4**3 * 2**3
+
+    def test_quorum_failure_retry_then_settlement_is_final(self, env):
+        pid = buy(env.c, env.vm, env.farmer)
+        warp_to(env.vm, MATURITY + timedelta(hours=3))
+        mock_sources(env.vm, (TIER3, TIER3), gfs=None, nasa=None)  # one source only
+        env.vm.sender = env.farmer
+        assert env.c.evaluate_claim(pid)["outcome"] == "QUORUM_FAILURE"
+        with env.vm.expect_revert("too recently"):
+            env.c.evaluate_claim(pid)
+        warp_to(env.vm, MATURITY + timedelta(days=1, hours=3))  # sources recovered
+        uniform(env.vm, TIER3)
+        assert env.c.evaluate_claim(pid)["payout_tier"] == 3
+        with env.vm.expect_revert("not claimable"):
+            env.c.evaluate_claim(pid)
+
+    def test_quorum_failure_retries_then_releases_at_grace_end(self, env):
+        """Retries are allowed until grace ends. Once it has, expiry releases the
+        reserve immediately. There is no separate hold after the last attempt."""
         pid = buy(env.c, env.vm, env.farmer)
         warp_to(env.vm, T0 + timedelta(days=POLICY_DAYS + 29, hours=3))  # late in grace
         mock_sources(env.vm, (TIER3, TIER3), gfs=None, nasa=None)  # outage
         env.vm.sender = env.farmer
-        assert env.c.evaluate_claim(pid)["outcome"] == "INCONCLUSIVE_QUORUM"
-        warp_to(env.vm, EXPIRED_AT)  # grace over, but the last try is 2 days old
-        with env.vm.expect_revert("retry hold"):
-            env.c.expire_policy(pid)
-        warp_to(env.vm, T0 + timedelta(days=POLICY_DAYS + 29, hours=3) + timedelta(days=14, minutes=1))
+        assert env.c.evaluate_claim(pid)["outcome"] == "QUORUM_FAILURE"
+        warp_to(env.vm, EXPIRED_AT)  # grace over; the last try was hours ago
         env.c.expire_policy(pid)
         assert env.c.get_policy(pid)["status"] == "EXPIRED"
+        assert int(env.c.get_pool()["total_liabilities"]) == 0
 
     def test_epoch_exposure_cap(self, env):
         env.vm.sender = env.admin
@@ -499,7 +603,7 @@ class TestAuditRegressions:
         assert claim["payout_tier"] == 1 and claim["outcome"] == "MODERATE_DROUGHT"
         assert claim["median_deficit"] == 35
         assert int(claim["approved_payout"]) == 3 * ATTO  # 30% of 10 GEN
-        assert env.c.get_policy(pid)["status"] == "CLAIM_APPROVED"
+        assert env.c.get_policy(pid)["status"] == "SETTLED_PAYOUT"
 
     # Round 2/3 carried forward: admin self-dealing, vault shares, payloads
     def test_admin_self_insurance_prevented(self, env):
@@ -599,7 +703,7 @@ class TestAuditRegressions:
             "tier/deficit mismatch": {**good, "tier": 3, "median_deficit": 10},
             "settled below quorum": {**good, "source_count": 1},
             "quorum failure with 3 sources": {"tier": -2, "median_deficit": 0, "source_count": 3, "reasoning": "x"},
-            "disagreement with 1 source": {"tier": -1, "median_deficit": 50, "source_count": 1, "reasoning": "x"},
+            "retired split code -1": {"tier": -1, "median_deficit": 50, "source_count": 3, "reasoning": "x"},
             "too many sources": {**good, "source_count": 99},
             "oversized reasoning": {**good, "reasoning": "A" * 5000},
             "control chars": {**good, "reasoning": "ok\x00\x1b[31m"},
@@ -610,19 +714,21 @@ class TestAuditRegressions:
         for name, payload in bad.items():
             assert env.vm.run_validator(leader_result=payload) is False, name
 
-    def test_outcome_class_is_consensus_checked(self, env):
-        """A leader cannot relabel a split as an outage to get a retry. The class
-        code is compared exactly, like any tier."""
+    def test_settled_tier_is_consensus_checked(self, env):
+        """Three sources answer with ERA5 at Tier 3 and the others at Tier 1. The
+        median is Tier 1. A leader cannot claim a different tier, nor relabel the
+        split as an outage, and the honest median passes."""
         pid = buy(env.c, env.vm, env.farmer)
         warp_to(env.vm, MATURITY + timedelta(hours=3))
-        mock_sources(env.vm, (TIER3, TIER3), gfs=(NORMAL, NORMAL), nasa=(NORMAL, NORMAL))  # all 3 answer; ERA5 dissents
+        mock_sources(env.vm, (TIER3, TIER3), gfs=(TIER1, TIER1), nasa=(TIER1, TIER1))
         env.vm.sender = env.farmer
         env.c.evaluate_claim(pid)
+        assert env.vm.run_validator(leader_result={"tier": 1, "median_deficit": 28, "source_count": 3, "reasoning": "x"}) is True
+        assert env.vm.run_validator(leader_result={"tier": 3, "median_deficit": 85, "source_count": 3, "reasoning": "x"}) is False
+        assert env.vm.run_validator(leader_result={"tier": 0, "median_deficit": 0, "source_count": 3, "reasoning": "x"}) is False
         relabelled = {"tier": -2, "median_deficit": 0, "source_count": 1, "reasoning": "x"}
         assert env.vm.run_validator(leader_result=relabelled) is False
-        split = {"tier": -1, "median_deficit": 50, "source_count": 3, "reasoning": "x"}
-        assert env.vm.run_validator(leader_result=split) is True
 
     def test_stored_reasoning_is_canonical_not_leader_text(self, env):
         _, claim = claim_with(env, TIER2)
-        assert claim["reasoning"] == "3 sources agree on tier 2 (SEVERE_DROUGHT), median sustained deficit 64%"
+        assert claim["reasoning"] == "3 sources answered: median tier 2 (SEVERE_DROUGHT), median sustained deficit 64%"

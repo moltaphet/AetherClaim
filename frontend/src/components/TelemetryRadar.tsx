@@ -128,9 +128,15 @@ export default function TelemetryRadar({ plotId }: { plotId: string | null }) {
   }, [scan]);
 
   const valid = rows.filter((r) => r.status === "ok");
-  const tiers = new Set(valid.map((r) => r.tier));
-  const quorum = valid.length >= 2 && tiers.size === 1;
-  const verdict = valid.length < 2 ? "INCONCLUSIVE · too few sources" : tiers.size > 1 ? "INCONCLUSIVE · sources disagree" : TIERS[[...tiers][0] ?? 0].label;
+  // Same aggregation as the contract: median of three answering sources, or the
+  // lower of two. Fewer than two is a quorum failure, which allows a retry.
+  const sorted = valid.map((r) => r.tier!).sort((a, b) => a - b);
+  const quorum = valid.length >= 2;
+  const agreed = quorum ? (valid.length === 3 ? sorted[1] : sorted[0]) : null;
+  const split = quorum && new Set(sorted).size > 1;
+  const verdict = !quorum
+    ? "QUORUM_FAILURE · retry permitted"
+    : `${valid.length === 3 ? "median of 3" : "lower of 2"} → ${TIERS[agreed!].label}${split ? " · sources split" : ""}`;
 
   return (
     <section className="grid gap-6 lg:grid-cols-3">
@@ -183,17 +189,17 @@ export default function TelemetryRadar({ plotId }: { plotId: string | null }) {
           </div>
           <div className="mt-4 text-center">
             <div className="label">Agreed tier</div>
-            <div className={`mt-1 font-display text-2xl font-semibold ${quorum ? TIERS[[...tiers][0] ?? 0].color : "text-mist"}`}>
-              {quorum ? `TIER ${[...tiers][0]}` : "—"}
+            <div className={`mt-1 font-display text-2xl font-semibold ${quorum ? TIERS[agreed!].color : "text-mist"}`}>
+              {quorum ? `TIER ${agreed}` : "—"}
             </div>
             <p className="mt-1 font-mono text-xs">{verdict}</p>
           </div>
         </div>
         <ul className="mt-6 space-y-1 text-xs text-mist">
-          <li>≥ 2 sources must answer HTTP 200</li>
-          <li>All answering sources must share one tier</li>
-          <li>Both windows must breach (min-of-windows)</li>
-          <li>Otherwise: INCONCLUSIVE, zero payout</li>
+          <li>≥ 2 sources must answer HTTP 200, else QUORUM_FAILURE (retry)</li>
+          <li>Three answer: settle at the median tier. Two answer: the lower tier</li>
+          <li>A split never pays zero. One faulty station cannot erase a claim two sources support</li>
+          <li>Each source uses the lower of its two windows (sustained deviation)</li>
         </ul>
       </div>
     </section>

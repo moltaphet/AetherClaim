@@ -15,9 +15,11 @@
 #      admin-curated registry (cadastral hash, baseline, crop cycle). The
 #      observation URLs are built INSIDE the contract from registry
 #      coordinates; no caller-supplied URL or coordinate ever reaches a fetch.
-#   2. Multi-source corroboration. Three independent sources; >= 2 must answer
-#      and ALL answering sources must land in the same tier, otherwise the
-#      round is INCONCLUSIVE and pays nothing.
+#   2. Multi-source aggregation. Three independent sources. With all three
+#      answering, the settled tier is their MEDIAN. With two answering, it is the
+#      LOWER of the two. With fewer than two, the result is QUORUM_FAILURE and
+#      the policy stays open for a retry. A split never pays zero. It settles at
+#      the conservative tier that at least two answering sources support.
 #   3. Sustained deviation. The tier is the MINIMUM across two consecutive
 #      observation windows, so a one-window anomaly pays nothing.
 #   4. Discrete payouts. Only 0 / 30 / 70 / 100 percent exist. Validators
@@ -32,9 +34,10 @@
 #      reserved capital is left without a shareholder.
 #   9. Worthless-policy guard. A term whose final window falls below the floor is
 #      refused at purchase, so no premium is taken for a policy that cannot pay.
-#  10. Outage tolerance without timing options. Quorum failures (fewer than two
-#      sources) are retryable for 30 days after term end. A source disagreement is
-#      final, so a retry cannot wait for a dissenting source to go down.
+#  10. Availability cannot raise a payout. The aggregate is an order statistic:
+#      dropping a source can only lower the settled tier, never raise it. So
+#      retrying during an outage gains nothing (see _corroborate and the sweep
+#      test). Quorum failures are retryable until 30 days after term end.
 #   6. Cooldown + vesting + exposure caps. Approved payouts sit through a
 #      24h cooldown, then vest linearly over 3 days; per-epoch underwriting is
 #      capped and total liabilities may never exceed the pool.
@@ -73,10 +76,6 @@ VESTING = 3 * DAY  # linear vesting length
 # third-party API outage cannot forfeit a valid claim.
 EXPIRY_GRACE_DAYS = 30
 EXPIRY_GRACE = EXPIRY_GRACE_DAYS * DAY
-# After an inconclusive (quorum failure) attempt, expiry waits this long, so a
-# retry window is never closed under a policyholder's feet.
-RETRY_HOLD_DAYS = 14
-RETRY_HOLD = RETRY_HOLD_DAYS * DAY
 PREMIUM_BPS = 800  # 8.00% of coverage
 MIN_COVERAGE = 10**15
 MAX_POLICY_POOL_BPS = 2500  # one policy may not exceed 25% of the pool
@@ -90,13 +89,13 @@ SOURCE_COUNT = 3
 
 # Discrete payout buckets: tier -> (min deficit pct, payout bps, label)
 TIER_PAYOUT_BPS = {0: 0, 1: 3000, 2: 7000, 3: 10000}
-# Negative codes are inconclusive outcomes. They are consensus values like any
-# other tier, so validators compare them exactly and a leader cannot relabel one.
-#   -2 QUORUM:   fewer than MIN_SOURCES answered. An outage, not a verdict. Retryable.
-#   -1 DISAGREE: a quorum answered and the sources split. Final, no payout.
+# -2 is the only inconclusive code: fewer than MIN_SOURCES answered. It is an
+# outage, not a verdict, and it is the only outcome that leaves a policy open.
+# A split between answering sources is NOT inconclusive. It settles at the
+# conservative tier (see _corroborate). The code is a consensus value, so
+# validators compare it exactly and a leader cannot relabel an outage as a verdict.
 TIER_LABEL = {
-    -2: "INCONCLUSIVE_QUORUM",
-    -1: "INCONCLUSIVE_DISAGREE",
+    -2: "QUORUM_FAILURE",
     0: "NORMAL",
     1: "MODERATE_DROUGHT",
     2: "SEVERE_DROUGHT",
@@ -150,7 +149,7 @@ class PolicyRecord:
     start_ts: u256
     end_ts: u256
     claimed: bool
-    status: str  # ACTIVE | CLAIM_APPROVED | SETTLED_NO_PAYOUT | EXPIRED
+    status: str  # ACTIVE | SETTLED_PAYOUT | SETTLED_NO_PAYOUT | EXPIRED
     observation_start: u256  # first day of the 28-day window span, fixed at purchase
     observation_end: u256  # last full day inside the term, fixed at purchase
     matures_at: u256  # term end + reanalysis lag: the only moment a verdict may be taken
@@ -160,7 +159,7 @@ class PolicyRecord:
 @dataclass
 class ClaimRecord:
     payout_tier: u256
-    outcome: str  # TIER label or INCONCLUSIVE
+    outcome: str  # TIER label, or QUORUM_FAILURE
     median_deficit: u256
     source_count: u256
     reasoning: str
@@ -222,14 +221,6 @@ def _fmt_e4(v: int) -> str:
     sign = "-" if v < 0 else ""
     a = abs(v)
     return f"{sign}{a // 10000}.{a % 10000:04d}"
-
-
-def _median(vals):
-    s = sorted(vals)
-    n = len(s)
-    if n % 2 == 1:
-        return s[n // 2]
-    return (s[n // 2 - 1] + s[n // 2]) // 2
 
 
 def _window_bounds(obs_end: datetime):
@@ -327,13 +318,17 @@ def _observe_source(source: str, url: str, windows, baselines_tenths):
 
 
 def _canonical_reasoning(tier: int, median: int, count: int) -> str:
+    """Built from committed fields only, never from leader text."""
     if tier == -2:
-        return f"INCONCLUSIVE_QUORUM: {count} of {SOURCE_COUNT} sources answered, {MIN_SOURCES} required; retry allowed"
-    if tier == -1:
-        return f"INCONCLUSIVE_DISAGREE: {count} sources answered and disagree on tier; final, no payout"
+        return f"QUORUM_FAILURE: {count} of {SOURCE_COUNT} sources answered, {MIN_SOURCES} required; retry permitted"
+    if count == SOURCE_COUNT:
+        return (
+            f"{count} sources answered: median tier {tier} ({TIER_LABEL[tier]}), "
+            f"median sustained deficit {median}%"
+        )
     return (
-        f"{count} sources agree on tier {tier} ({TIER_LABEL[tier]}), "
-        f"median sustained deficit {median}%"
+        f"{count} sources answered: conservative floor tier {tier} ({TIER_LABEL[tier]}), "
+        f"lower sustained deficit {median}%"
     )
 
 
@@ -350,7 +345,7 @@ def _payload_ok(obj) -> bool:
     for v in (tier, med, cnt):
         if isinstance(v, bool) or not isinstance(v, int):
             return False
-    if tier < -2 or tier > 3:
+    if tier != -2 and (tier < 0 or tier > 3):
         return False
     if med < 0 or med > 100:
         return False
@@ -361,9 +356,7 @@ def _payload_ok(obj) -> bool:
     if any(ord(ch) < 32 or ord(ch) > 126 for ch in why):
         return False
     if tier == -2 and cnt >= MIN_SOURCES:
-        return False  # quorum failure means fewer than MIN_SOURCES answered
-    if tier == -1 and cnt < MIN_SOURCES:
-        return False  # disagreement means a quorum answered
+        return False  # a quorum failure means fewer than MIN_SOURCES answered
     if tier >= 0:
         # A settled tier needs a quorum, and the deficit must sit in its bucket.
         if cnt < MIN_SOURCES or _tier_for_deficit(med) != tier:
@@ -372,33 +365,42 @@ def _payload_ok(obj) -> bool:
 
 
 def _corroborate(observations):
-    """Deterministic consensus over per-source (name, (tier, deficit)|None).
+    """Deterministic consensus over per-source (name, (tier, deficit) | None).
 
-    Pure function so it is unit-testable and identical on every validator."""
-    valid = [(n, o) for n, o in observations if o is not None]
-    if len(valid) < MIN_SOURCES:
+    Aggregation is an ORDER STATISTIC, which makes it monotone in availability:
+      * fewer than MIN_SOURCES answered: QUORUM_FAILURE (-2), retry permitted.
+      * all three answered: the MEDIAN tier. Two sources read at least that tier
+        and two read at most it, so one faulty station in either direction cannot
+        move the payout past the majority view.
+      * two answered: the LOWER tier. Conservative: LPs never pay above what both
+        answering sources support.
+
+    Monotonicity: dropping a source can only lower the settled tier, never raise
+    it. Each source's tier is a non-decreasing function of its deficit, so the
+    k-th order statistic of the tiers is the tier of the k-th order statistic of
+    the deficits. median_deficit is therefore the same order statistic and stays
+    consistent with the settled tier. A min over all three would not be monotone:
+    a source going down could lift the settled tier (checked exhaustively in
+    tests/test_aether_claim.py::test_availability_cannot_raise_payout).
+    """
+    answered = [o for _, o in observations if o is not None]
+    count = len(answered)
+    if count < MIN_SOURCES:
         return {
             "tier": -2,
             "median_deficit": 0,
-            "source_count": len(valid),
-            "reasoning": _canonical_reasoning(-2, 0, len(valid)),
+            "source_count": count,
+            "reasoning": _canonical_reasoning(-2, 0, count),
         }
-    tiers = sorted({o[0] for _, o in valid})
-    deficits = [o[1] for _, o in valid]
-    med = _median(deficits)
-    if len(tiers) != 1:
-        return {
-            "tier": -1,
-            "median_deficit": med,
-            "source_count": len(valid),
-            "reasoning": _canonical_reasoning(-1, med, len(valid)),
-        }
-    tier = tiers[0]
+    tiers = sorted(o[0] for o in answered)
+    deficits = sorted(o[1] for o in answered)
+    k = 1 if count == SOURCE_COUNT else 0  # median of three, lower of two
+    tier, med = tiers[k], deficits[k]
     return {
         "tier": tier,
         "median_deficit": med,
-        "source_count": len(valid),
-        "reasoning": _canonical_reasoning(tier, med, len(valid)),
+        "source_count": count,
+        "reasoning": _canonical_reasoning(tier, med, count),
     }
 
 
@@ -523,7 +525,8 @@ class AetherClaim(gl.contract.Contract):
             "min_insurable_baseline_mm": MIN_INSURABLE_BASELINE_MM,
             "data_lag_days": DATA_LAG_DAYS,
             "expiry_grace_days": EXPIRY_GRACE_DAYS,
-            "retry_hold_days": RETRY_HOLD_DAYS,
+            "quorum_min_sources": MIN_SOURCES,
+            "aggregation": "median of 3 answering sources; lower of 2",
             "exposure_cap_bounds": [str(MIN_EXPOSURE_CAP), str(MAX_EXPOSURE_CAP)],
             "policy_days": POLICY_DAYS,
             "epoch_seconds": EPOCH_SECONDS,
@@ -826,29 +829,43 @@ class AetherClaim(gl.contract.Contract):
 
     @gl.public.write
     def expire_policy(self, policy_id: str) -> None:
-        """Release the reserve held for a policy that ran out unclaimed."""
+        """Release the reserve of an unclaimed policy once the grace period ends.
+
+        The grace period is the retry window. Quorum-failure retries are allowed
+        until term end + EXPIRY_GRACE, and evaluate_claim closes at exactly the
+        same instant. Expiry opens immediately after, so no separate hold is
+        needed, and LP capital is released as soon as the window is gone."""
         if policy_id not in self.policies:
             raise gl.vm.UserError(f"{ERR_EXPECTED} unknown policy")
         pol = self.policies[policy_id]
         if pol.status != "ACTIVE":
             raise gl.vm.UserError(f"{ERR_EXPECTED} policy not active")
-        now = self._now()
-        if now <= pol.end_ts + EXPIRY_GRACE:
+        if self._now() <= pol.end_ts + EXPIRY_GRACE:
             raise gl.vm.UserError(f"{ERR_EXPECTED} TIMELOCK still inside claim grace period")
-        prior = self.claims.get(policy_id, None)
-        if prior is not None and now < int(prior.evaluated_at) + RETRY_HOLD:
-            raise gl.vm.UserError(f"{ERR_EXPECTED} TIMELOCK retry hold: an inconclusive attempt is still inside its window")
         pol.status = "EXPIRED"
         self.total_liabilities -= pol.coverage_amount
 
     # ----------------------------------------------------------------- claims
     @gl.public.write
     def evaluate_claim(self, policy_id: str) -> dict:
-        """European-style exercise. The verdict is taken only once the policy's
-        fixed observation windows have matured, so the caller cannot pick the day
-        to look at the weather. Windows come from the policy record, never from
-        the caller's clock. A settled outcome is final. INCONCLUSIVE leaves the
-        policy open for a retry, rate-limited to one attempt per EVAL_MIN_GAP."""
+        """Settle a policy's claim against its fixed observation windows.
+
+        Timing assumptions (stated for auditors):
+          * Windows are fixed at purchase. Evaluation opens at matures_at and
+            closes at end_ts + EXPIRY_GRACE. The closing instant equals the
+            opening instant of expiry, so the two cannot both be open.
+          * Only QUORUM_FAILURE leaves a policy ACTIVE. A retry is allowed at
+            most once per EVAL_MIN_GAP.
+          * Every settled outcome (tier 0 or a payout) is final on first
+            settlement. A second evaluation is refused.
+          * Availability cannot raise the outcome. Whichever subset of sources
+            answers, the settled tier is at most the all-three median (see
+            _corroborate). A retry can therefore never beat a full evaluation.
+          * Data stability. The contract assumes the historical values inside the
+            fixed windows do not change during the grace period. A source that
+            revises a value can change the result of a quorum-failure retry. The
+            first settlement is still final.
+        """
         if policy_id not in self.policies:
             raise gl.vm.UserError(f"{ERR_EXPECTED} unknown policy")
         pol = self.policies[policy_id]
@@ -882,28 +899,21 @@ class AetherClaim(gl.contract.Contract):
             if not isinstance(leaders_res, gl.vm.Return):
                 return False  # leader error: force rotation, never ratify
             theirs = leaders_res.calldata
-            # Whole-payload structure and bounds first: a malformed or
-            # injected payload is rejected without being compared to anything.
             if not _payload_ok(theirs):
                 return False
             mine = leader_fn()
             if not _payload_ok(mine):
                 return False
-            # EXACT discrete-tier equality. No tolerance band exists.
+            # EXACT equality of the aggregated tier, including the -2 outage code.
             return int(theirs["tier"]) == int(mine["tier"])
 
         res = gl.vm.run_nondet(leader_fn, validator_fn)
-        # Defence in depth: only a payload that passes the same strict check the
-        # validators applied may reach storage.
         if not _payload_ok(res):
             raise gl.vm.UserError(f"{ERR_EXTERNAL} malformed consensus payload")
         tier = int(res["tier"])
 
         evals = (int(prior.evaluations) if prior is not None else 0) + 1
-        payout = 0
-        if tier >= 1:
-            payout = int(pol.coverage_amount) * TIER_PAYOUT_BPS[tier] // 10000
-        approved = payout > 0
+        payout = 0 if tier <= 0 else int(pol.coverage_amount) * TIER_PAYOUT_BPS[tier] // 10000
         self.claims[policy_id] = ClaimRecord(
             payout_tier=max(tier, 0),
             outcome=TIER_LABEL[tier],
@@ -913,21 +923,18 @@ class AetherClaim(gl.contract.Contract):
             approved_payout=payout,
             vested_amount=0,
             last_release_timestamp=0,
-            cooldown_until=now + COOLDOWN if approved else 0,
+            cooldown_until=now + COOLDOWN if payout > 0 else 0,
             evaluated_at=now,
             evaluations=evals,
         )
         if tier == -2:
-            # Quorum failure is an outage, not a verdict. Reserve stays, policy
-            # stays ACTIVE, and a retry is allowed once a day until grace ends.
+            # Quorum failure: an outage, not a verdict. Stay ACTIVE for a retry.
             return self.get_claim(policy_id)
-        # Every other outcome is final, including DISAGREE. A retry after a split
-        # could otherwise wait for the dissenting source to go down. Release the
-        # reserve and close the policy.
+        # Settled. Release the reserve and close the policy.
         self.total_liabilities -= pol.coverage_amount
-        if approved:
+        if payout > 0:
             pol.claimed = True
-            pol.status = "CLAIM_APPROVED"
+            pol.status = "SETTLED_PAYOUT"
             self.pool_balance -= payout
             self.committed_payouts += payout
         else:

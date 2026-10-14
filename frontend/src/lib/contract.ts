@@ -4,7 +4,7 @@
 export const CHAIN_ID = 61997;
 export const CHAIN_ID_HEX = "0xf22d";
 export const CONTRACT_ADDRESS =
-  process.env.NEXT_PUBLIC_AETHER_CLAIM_ADDRESS ?? "0x2641A4678ba75EE21ad6f8A7436209B5675f8B23";
+  process.env.NEXT_PUBLIC_AETHER_CLAIM_ADDRESS ?? "0x5bbb679430b88BA07aC7bcF898Dc39d1dc70C2a8";
 
 // Primary first, fallback second. Both serve chain 61997.
 export const RPC_URLS = [
@@ -332,7 +332,6 @@ export const MIN_INSURABLE_BASELINE_MM = 10; // windows expecting less rain cann
 export const DATA_LAG_DAYS = 6;
 export const TERM_DAYS = 90;
 export const EXPIRY_GRACE_DAYS = 30; // evaluation stays open this long after term end
-export const RETRY_HOLD_DAYS = 14; // expiry waits this long after an outage attempt
 
 export function monthInCycle(month: number, start: number, end: number): boolean {
   return start <= end ? month >= start && month <= end : month >= start || month <= end;
@@ -413,16 +412,14 @@ export function nextInsurableStart(p: Plot, from = new Date(), maxDays = 400): D
   return null;
 }
 
-/** Plain-language label for a settled or inconclusive claim outcome. */
-export function outcomeNote(outcome: string): string {
-  switch (outcome) {
-    case "INCONCLUSIVE_QUORUM":
-      return "fewer than 2 sources answered · retry open";
-    case "INCONCLUSIVE_DISAGREE":
-      return "sources disagree · final, no payout";
-    case "NORMAL":
-      return "no drought · final, no payout";
-    default:
-      return "";
-  }
+/**
+ * Plain-language note for a claim outcome. Settled tiers say which aggregation
+ * produced them: the median of three answering sources, or the conservative
+ * lower of two.
+ */
+export function outcomeNote(outcome: string, sourceCount: number): string {
+  if (outcome === "QUORUM_FAILURE") return "fewer than 2 sources answered · retry permitted until grace ends";
+  if (outcome === "NORMAL") return "no drought · final, no payout";
+  const basis = sourceCount === 3 ? "median of 3 sources" : "conservative lower of 2 sources";
+  return `${basis} · final`;
 }
