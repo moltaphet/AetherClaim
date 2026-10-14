@@ -1,6 +1,7 @@
 "use client";
 import { useState } from "react";
 import ClaimStream from "@/components/ClaimStream";
+import LiquidityVault from "@/components/LiquidityVault";
 import PlotRegistry from "@/components/PlotRegistry";
 import PolicyVault from "@/components/PolicyVault";
 import TelemetryRadar from "@/components/TelemetryRadar";
@@ -12,6 +13,7 @@ const TABS = [
   { id: "plots", label: "Plot Registry" },
   { id: "telemetry", label: "Telemetry" },
   { id: "desk", label: "Underwriting Desk" },
+  { id: "vault", label: "LP Vault" },
   { id: "claims", label: "Claims & Vesting" },
 ] as const;
 
@@ -62,6 +64,7 @@ export default function Page() {
         {tab === "plots" && <PlotRegistry selected={plot} onSelect={setPlot} />}
         {tab === "telemetry" && <TelemetryRadar plotId={plot} />}
         {tab === "desk" && <PolicyVault plotId={plot} onChange={() => setTick((n) => n + 1)} />}
+        {tab === "vault" && <LiquidityVault refreshKey={tick} />}
         {tab === "claims" && <ClaimStream refreshKey={tick} />}
 
         <footer className="mt-16 font-mono text-[11px] text-mist">

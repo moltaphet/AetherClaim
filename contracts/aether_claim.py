@@ -46,7 +46,7 @@ ERR_TRANSIENT = "[TRANSIENT]"  # non-deterministic upstream problem
 
 # --- Protocol constants ------------------------------------------------------
 DAY = 86400
-STAGING_DELAY = DAY  # plot staging -> activation
+STAGING_DELAY = 7 * DAY  # plot staging -> activation
 EPOCH_SECONDS = 7 * DAY  # exposure accounting epoch
 WINDOW_DAYS = 14  # one observation window
 N_WINDOWS = 2  # consecutive windows that must both breach
@@ -60,6 +60,11 @@ PREMIUM_BPS = 800  # 8.00% of coverage
 MIN_COVERAGE = 10**15
 MAX_POLICY_POOL_BPS = 2500  # one policy may not exceed 25% of the pool
 MIN_SOURCES = 2
+MIN_DEPOSIT = 10**15  # blocks first-depositor share-inflation dust attacks
+MIN_EXPOSURE_CAP = MIN_COVERAGE
+MAX_EXPOSURE_CAP = 100_000 * 10**18
+REASONING_MAX = 400
+DAYS_PER_MONTH = 30  # monthly baseline -> per-window baseline scaling
 SOURCE_COUNT = 3
 
 # Discrete payout buckets: tier -> (min deficit pct, payout bps, label)
@@ -73,15 +78,22 @@ TIER_LABEL = {
 }
 
 # Genesis registry, seeded into storage at deployment and active immediately.
-# lat/lon are degrees * 10_000; baseline is mm of rain expected per 14-day window.
+# lat/lon are degrees * 10_000. `monthly` is expected rainfall in mm for each
+# calendar month Jan..Dec; the per-14-day-window baseline is derived from the
+# month the window falls in. The crop cycle is (start_month, end_month), and may
+# wrap the year end (Oct..Mar).
 GENESIS_PLOTS = [
-    ("CV-ALMOND-01", "Central Valley Almond Basin", "ALMOND", 366000, -1198000, 14,
-     "7c1f0a52d19b3e6a8f4b0c2d9e57a31b6f8d40c7e92a5b1d3c68f0a47e2b9d15", "Feb-Nov"),
-    ("IA-CORN-01", "Iowa Corn Belt", "CORN", 420300, -938200, 34,
-     "b3a94e07c5d12f68a0e7b94c1d3f56a8e20c97b4d1f63a85c0e2b7194d6f3a08", "Apr-Oct"),
-    ("AND-OLIVE-01", "Andalusia Olive Groves", "OLIVE", 373800, -43700, 21,
-     "e51d7c3a9f08b246d1a5e83c70b9f4d2a6c18e5f307b94d2c1a8e6f05b3d7a49", "Oct-Mar"),
+    ("CV-ALMOND-01", "Central Valley Almond Basin", "ALMOND", 366000, -1198000,
+     [50, 45, 30, 20, 8, 2, 0, 0, 4, 15, 30, 45],
+     "7c1f0a52d19b3e6a8f4b0c2d9e57a31b6f8d40c7e92a5b1d3c68f0a47e2b9d15", 2, 11),
+    ("IA-CORN-01", "Iowa Corn Belt", "CORN", 420300, -938200,
+     [25, 28, 55, 95, 120, 140, 115, 110, 85, 70, 50, 35],
+     "b3a94e07c5d12f68a0e7b94c1d3f56a8e20c97b4d1f63a85c0e2b7194d6f3a08", 4, 10),
+    ("AND-OLIVE-01", "Andalusia Olive Groves", "OLIVE", 373800, -43700,
+     [60, 55, 50, 45, 30, 10, 2, 3, 25, 60, 75, 70],
+     "e51d7c3a9f08b246d1a5e83c70b9f4d2a6c18e5f307b94d2c1a8e6f05b3d7a49", 10, 3),
 ]
+MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
 
 @allow_storage
@@ -91,9 +103,10 @@ class PlotDetails:
     crop_type: str
     latitude_e4: i64  # degrees * 10_000
     longitude_e4: i64
-    baseline_rainfall_mm: u32  # expected mm per 14-day observation window
+    monthly_baselines_csv: str  # 12 comma-separated ints: expected mm, Jan..Dec
     cadastral_hash: str  # 64-hex digest of the official parcel boundary
-    crop_cycle: str
+    crop_cycle_start_month: u32  # 1..12
+    crop_cycle_end_month: u32  # 1..12, may be < start (wraps the year)
     active: bool
     staged_at: u256
     registered_at: u256  # 0 until activated
@@ -147,6 +160,33 @@ def _tier_for_deficit(deficit_pct: int) -> int:
     if deficit_pct >= 25:
         return 1
     return 0
+
+
+def _parse_baselines(csv: str):
+    return [int(x) for x in csv.split(",")]
+
+
+def _month_in_cycle(month: int, start: int, end: int) -> bool:
+    if start <= end:
+        return start <= month <= end
+    return month >= start or month <= end
+
+
+def _valid_baselines(vals) -> bool:
+    if not isinstance(vals, (list, tuple)) or len(vals) != 12:
+        return False
+    for v in vals:
+        if isinstance(v, bool) or not isinstance(v, int) or v < 0 or v > 1000:
+            return False
+    return sum(vals) > 0
+
+
+def _window_baseline_tenths(monthly, w_start: datetime, w_end: datetime) -> int:
+    """Expected rain (tenths of mm) for one window: the monthly baseline of the
+    month the window's midpoint falls in, scaled to the window length."""
+    mid = w_start + (w_end - w_start) / 2
+    monthly_mm = int(monthly[mid.month - 1])
+    return monthly_mm * 10 * WINDOW_DAYS // DAYS_PER_MONTH
 
 
 def _fmt_e4(v: int) -> str:
@@ -224,7 +264,7 @@ def _daily_series(source: str, body: dict, days):
     return out
 
 
-def _observe_source(source: str, url: str, windows, baseline_tenths: int):
+def _observe_source(source: str, url: str, windows, baselines_tenths):
     """Returns (tier, deficit) for one source, or None when it is not valid."""
     try:
         res = gl.nondet.web.get(url)
@@ -241,16 +281,55 @@ def _observe_source(source: str, url: str, windows, baseline_tenths: int):
         if series is None:
             return None
         deficits = []
-        for w_start, w_end in windows:
+        for idx, (w_start, w_end) in enumerate(windows):
             total = 0
             for i in range((w_end - w_start).days + 1):
                 total += series[(w_start + timedelta(days=i)).strftime("%Y-%m-%d")]
-            deficits.append(_deficit_pct(baseline_tenths, total))
+            deficits.append(_deficit_pct(baselines_tenths[idx], total))
         # Sustained deviation: the weakest window decides the source's verdict.
         sustained = min(deficits)
         return (_tier_for_deficit(sustained), sustained)
     except Exception:
         return None
+
+
+def _canonical_reasoning(tier: int, median: int, count: int) -> str:
+    if tier < 0:
+        return f"INCONCLUSIVE: {count} corroborating sources, no quorum on a single tier"
+    return (
+        f"{count} sources agree on tier {tier} ({TIER_LABEL[tier]}), "
+        f"median sustained deficit {median}%"
+    )
+
+
+def _payload_ok(obj) -> bool:
+    """Strict structural + bounds check of a consensus payload. Pure function:
+    used by validators on the leader's output and by the contract again before
+    anything is written to storage."""
+    if not isinstance(obj, dict):
+        return False
+    for key in ("tier", "median_deficit", "source_count", "reasoning"):
+        if key not in obj:
+            return False
+    tier, med, cnt, why = obj["tier"], obj["median_deficit"], obj["source_count"], obj["reasoning"]
+    for v in (tier, med, cnt):
+        if isinstance(v, bool) or not isinstance(v, int):
+            return False
+    if tier < -1 or tier > 3:
+        return False
+    if med < 0 or med > 100:
+        return False
+    if cnt < 0 or cnt > SOURCE_COUNT:
+        return False
+    if not isinstance(why, str) or len(why) > REASONING_MAX:
+        return False
+    if any(ord(ch) < 32 or ord(ch) > 126 for ch in why):
+        return False
+    if tier >= 0:
+        # A settled tier needs a quorum, and the deficit must sit in its bucket.
+        if cnt < MIN_SOURCES or _tier_for_deficit(med) != tier:
+            return False
+    return True
 
 
 def _corroborate(observations):
@@ -263,27 +342,24 @@ def _corroborate(observations):
             "tier": -1,
             "median_deficit": 0,
             "source_count": len(valid),
-            "reasoning": f"INCONCLUSIVE: {len(valid)}/{len(observations)} sources valid, "
-            f"need {MIN_SOURCES}",
+            "reasoning": _canonical_reasoning(-1, 0, len(valid)),
         }
     tiers = sorted({o[0] for _, o in valid})
     deficits = [o[1] for _, o in valid]
     med = _median(deficits)
     if len(tiers) != 1:
-        detail = ", ".join(f"{n}={o[0]}" for n, o in valid)
         return {
             "tier": -1,
             "median_deficit": med,
             "source_count": len(valid),
-            "reasoning": f"INCONCLUSIVE: sources disagree on tier ({detail})",
+            "reasoning": _canonical_reasoning(-1, med, len(valid)),
         }
     tier = tiers[0]
     return {
         "tier": tier,
         "median_deficit": med,
         "source_count": len(valid),
-        "reasoning": f"{len(valid)} sources agree on tier {tier} "
-        f"({TIER_LABEL[tier]}), median sustained deficit {med}%",
+        "reasoning": _canonical_reasoning(tier, med, len(valid)),
     }
 
 
@@ -299,26 +375,31 @@ class AetherClaim(gl.contract.Contract):
     policy_ids: DynArray[str]
     claims: TreeMap[str, ClaimRecord]
     epoch_exposure: TreeMap[str, u256]  # str(epoch) -> coverage underwritten
-    lp_deposits: TreeMap[str, u256]  # address hex -> principal supplied
+    lp_shares: TreeMap[str, u256]  # address hex -> vault shares
+    total_lp_shares: u256
     next_policy_id: u256
 
     def __init__(self, max_epoch_exposure: int = 500 * 10**18):
+        if not (MIN_EXPOSURE_CAP <= max_epoch_exposure <= MAX_EXPOSURE_CAP):
+            raise gl.vm.UserError(f"{ERR_EXPECTED} exposure cap out of bounds")
         self.admin = gl.message.sender_address
+        self.total_lp_shares = 0
         self.pool_balance = 0
         self.total_liabilities = 0
         self.committed_payouts = 0
         self.max_epoch_exposure = max_epoch_exposure
         self.next_policy_id = 1
         now = self._now()
-        for pid, name, crop, lat, lon, base, chash, cycle in GENESIS_PLOTS:
+        for pid, name, crop, lat, lon, monthly, chash, c_start, c_end in GENESIS_PLOTS:
             self.plots[pid] = PlotDetails(
                 name=name,
                 crop_type=crop,
                 latitude_e4=lat,
                 longitude_e4=lon,
-                baseline_rainfall_mm=base,
+                monthly_baselines_csv=",".join(str(x) for x in monthly),
                 cadastral_hash=chash,
-                crop_cycle=cycle,
+                crop_cycle_start_month=c_start,
+                crop_cycle_end_month=c_end,
                 active=True,
                 staged_at=now,
                 registered_at=now,
@@ -344,9 +425,11 @@ class AetherClaim(gl.contract.Contract):
             "longitude": p.longitude_e4 / 10000,
             "latitude_e4": int(p.latitude_e4),
             "longitude_e4": int(p.longitude_e4),
-            "baseline_rainfall_mm": int(p.baseline_rainfall_mm),
+            "monthly_baselines": _parse_baselines(p.monthly_baselines_csv),
             "cadastral_hash": p.cadastral_hash,
-            "crop_cycle": p.crop_cycle,
+            "crop_cycle_start_month": int(p.crop_cycle_start_month),
+            "crop_cycle_end_month": int(p.crop_cycle_end_month),
+            "crop_cycle": f"{MONTH_NAMES[int(p.crop_cycle_start_month) - 1]}-{MONTH_NAMES[int(p.crop_cycle_end_month) - 1]}",
             "active": bool(p.active),
             "staged_at": int(p.staged_at),
             "registered_at": int(p.registered_at),
@@ -394,6 +477,8 @@ class AetherClaim(gl.contract.Contract):
             "cooldown_seconds": COOLDOWN,
             "vesting_seconds": VESTING,
             "staging_delay_seconds": STAGING_DELAY,
+            "min_deposit": str(MIN_DEPOSIT),
+            "exposure_cap_bounds": [str(MIN_EXPOSURE_CAP), str(MAX_EXPOSURE_CAP)],
             "policy_days": POLICY_DAYS,
             "epoch_seconds": EPOCH_SECONDS,
             "tier_payout_bps": {str(k): v for k, v in TIER_PAYOUT_BPS.items()},
@@ -412,6 +497,10 @@ class AetherClaim(gl.contract.Contract):
             "epoch_exposure": str(used),
             "max_epoch_exposure": str(self.max_epoch_exposure),
             "contract_balance": str(self.balance),
+            "total_lp_shares": str(self.total_lp_shares),
+            "share_price_atto": str(
+                self.pool_balance * 10**18 // self.total_lp_shares if self.total_lp_shares > 0 else 10**18
+            ),
         }
 
     @gl.public.view
@@ -464,27 +553,63 @@ class AetherClaim(gl.contract.Contract):
         }
 
     # ------------------------------------------------------------ underwriting
+    @gl.public.view
+    def get_lp(self, holder_hex: str) -> dict:
+        key = holder_hex.lower()
+        shares = self.lp_shares.get(key, 0)
+        value = shares * self.pool_balance // self.total_lp_shares if self.total_lp_shares > 0 else 0
+        return {"shares": str(shares), "value": str(value), "total_shares": str(self.total_lp_shares)}
+
     @gl.public.write.payable
-    def provide_liquidity(self) -> None:
-        if gl.message.value == 0:
-            raise gl.vm.UserError(f"{ERR_EXPECTED} zero deposit")
-        key = gl.message.sender_address.as_hex
-        self.lp_deposits[key] = self.lp_deposits.get(key, 0) + gl.message.value
-        self.pool_balance += gl.message.value
+    def provide_liquidity(self) -> int:
+        """ERC-4626-style deposit. Shares are priced against pool_balance BEFORE
+        this deposit lands, so earlier LPs keep their accrued premiums."""
+        amount = int(gl.message.value)
+        if amount < MIN_DEPOSIT:
+            raise gl.vm.UserError(f"{ERR_EXPECTED} deposit below minimum")
+        if self.total_lp_shares == 0:
+            shares = amount
+        else:
+            if self.pool_balance == 0:
+                raise gl.vm.UserError(f"{ERR_EXPECTED} pool exhausted, deposits closed")
+            shares = amount * int(self.total_lp_shares) // int(self.pool_balance)
+        if shares <= 0:
+            raise gl.vm.UserError(f"{ERR_EXPECTED} deposit mints zero shares")
+        key = gl.message.sender_address.as_hex.lower()
+        self.lp_shares[key] = self.lp_shares.get(key, 0) + shares
+        self.total_lp_shares += shares
+        self.pool_balance += amount
+        return shares
 
     @gl.public.write
-    def withdraw_liquidity(self, amount: int) -> None:
-        key = gl.message.sender_address.as_hex
-        amount = int(amount)
-        if amount <= 0:
-            raise gl.vm.UserError(f"{ERR_EXPECTED} zero amount")
-        if amount > self.lp_deposits.get(key, 0):
-            raise gl.vm.UserError(f"{ERR_EXPECTED} exceeds your principal")
-        if amount > self.pool_balance - self.total_liabilities:
+    def withdraw_liquidity(self, shares_to_burn: int) -> int:
+        """Burn shares for a pro-rata slice of the pool.
+
+        payout = shares * pool_balance / total_shares, and additionally capped at
+        the same fraction of UNRESERVED capital. The cap is what stops an LP
+        exiting just before a claim is recognised and leaving the remaining LPs
+        to absorb the loss: reserved capital can only leave through payouts or
+        policy expiry, never through the first LP to the door."""
+        key = gl.message.sender_address.as_hex.lower()
+        burn = int(shares_to_burn)
+        if burn <= 0:
+            raise gl.vm.UserError(f"{ERR_EXPECTED} zero shares")
+        if burn > self.lp_shares.get(key, 0):
+            raise gl.vm.UserError(f"{ERR_EXPECTED} exceeds your shares")
+        total = int(self.total_lp_shares)
+        pool = int(self.pool_balance)
+        payout = burn * pool // total
+        free = max(0, pool - int(self.total_liabilities))
+        payout = min(payout, burn * free // total)
+        if pool - payout < self.total_liabilities:
             raise gl.vm.UserError(f"{ERR_EXPECTED} capital reserved against live policies")
-        self.lp_deposits[key] = self.lp_deposits[key] - amount
-        self.pool_balance -= amount
-        gl.chain.Account(gl.message.sender_address).emit_transfer(amount, on="finalized")
+        if payout <= 0:
+            raise gl.vm.UserError(f"{ERR_EXPECTED} nothing withdrawable")
+        self.lp_shares[key] = self.lp_shares[key] - burn
+        self.total_lp_shares -= burn
+        self.pool_balance -= payout
+        gl.chain.Account(gl.message.sender_address).emit_transfer(payout, on="finalized")
+        return payout
 
     # --------------------------------------------------------- plot registry
     @gl.public.write
@@ -495,17 +620,22 @@ class AetherClaim(gl.contract.Contract):
         crop_type: str,
         latitude_e4: int,
         longitude_e4: int,
-        baseline_rainfall_mm: int,
+        monthly_baselines: list,
         cadastral_hash: str,
-        crop_cycle: str,
+        crop_cycle_start_month: int,
+        crop_cycle_end_month: int,
     ) -> None:
         self._require_admin()
         if not plot_id or len(plot_id) > 40 or plot_id in self.plots:
             raise gl.vm.UserError(f"{ERR_EXPECTED} invalid or duplicate plot_id")
         if not (-900000 <= latitude_e4 <= 900000 and -1800000 <= longitude_e4 <= 1800000):
             raise gl.vm.UserError(f"{ERR_EXPECTED} coordinates out of range")
-        if baseline_rainfall_mm <= 0 or baseline_rainfall_mm > 1000:
-            raise gl.vm.UserError(f"{ERR_EXPECTED} baseline out of range")
+        baselines = [int(v) if isinstance(v, int) and not isinstance(v, bool) else -1 for v in monthly_baselines]
+        if not _valid_baselines(baselines):
+            raise gl.vm.UserError(f"{ERR_EXPECTED} monthly_baselines must be 12 ints in 0..1000")
+        for m in (crop_cycle_start_month, crop_cycle_end_month):
+            if isinstance(m, bool) or not isinstance(m, int) or m < 1 or m > 12:
+                raise gl.vm.UserError(f"{ERR_EXPECTED} crop cycle month must be 1..12")
         h = cadastral_hash.lower()
         if len(h) != 64 or any(ch not in "0123456789abcdef" for ch in h):
             raise gl.vm.UserError(f"{ERR_EXPECTED} cadastral_hash must be 64 hex chars")
@@ -514,9 +644,10 @@ class AetherClaim(gl.contract.Contract):
             crop_type=crop_type,
             latitude_e4=latitude_e4,
             longitude_e4=longitude_e4,
-            baseline_rainfall_mm=baseline_rainfall_mm,
+            monthly_baselines_csv=",".join(str(v) for v in baselines),
             cadastral_hash=h,
-            crop_cycle=crop_cycle,
+            crop_cycle_start_month=crop_cycle_start_month,
+            crop_cycle_end_month=crop_cycle_end_month,
             active=False,
             staged_at=self._now(),
             registered_at=0,
@@ -547,18 +678,34 @@ class AetherClaim(gl.contract.Contract):
     @gl.public.write
     def set_max_epoch_exposure(self, amount: int) -> None:
         self._require_admin()
-        self.max_epoch_exposure = int(amount)
+        amount = int(amount)
+        if not (MIN_EXPOSURE_CAP <= amount <= MAX_EXPOSURE_CAP):
+            raise gl.vm.UserError(f"{ERR_EXPECTED} exposure cap out of bounds")
+        self.max_epoch_exposure = amount
 
     # --------------------------------------------------------------- policies
     @gl.public.write.payable
     def create_policy(self, plot_id: str, coverage_amount: int) -> str:
         coverage = int(coverage_amount)
+        if gl.message.sender_address == self.admin:
+            raise gl.vm.UserError(f"{ERR_EXPECTED} Admin cannot hold insurance policies")
         if plot_id not in self.plots:
             raise gl.vm.UserError(f"{ERR_EXPECTED} plot not in authenticated registry")
         if not self.plots[plot_id].active:
             raise gl.vm.UserError(f"{ERR_EXPECTED} plot not active")
         if coverage < MIN_COVERAGE:
             raise gl.vm.UserError(f"{ERR_EXPECTED} coverage below minimum")
+        # Seasonality: every calendar month the coverage term touches must be
+        # inside the plot's registered crop cycle, so off-season dry months
+        # (where a 'drought' is just the climate) can never be insured.
+        plot_rec = self.plots[plot_id]
+        c_start, c_end = int(plot_rec.crop_cycle_start_month), int(plot_rec.crop_cycle_end_month)
+        t_now = self._now()
+        probes = [t_now + d * DAY for d in range(0, POLICY_DAYS + 1, 7)] + [t_now + POLICY_DAYS * DAY]
+        for ts in probes:
+            month = datetime.fromtimestamp(ts, tz=timezone.utc).month
+            if not _month_in_cycle(month, c_start, c_end):
+                raise gl.vm.UserError(f"{ERR_EXPECTED} coverage term extends outside the crop cycle (off-season)")
         premium = coverage * PREMIUM_BPS // 10000
         if gl.message.value != premium:
             raise gl.vm.UserError(f"{ERR_EXPECTED} premium must be exactly {premium}")
@@ -641,28 +788,35 @@ class AetherClaim(gl.contract.Contract):
 
         plot = self.plots[pol.plot_id]
         lat, lon = int(plot.latitude_e4), int(plot.longitude_e4)
-        baseline_tenths = int(plot.baseline_rainfall_mm) * 10
+        monthly = _parse_baselines(plot.monthly_baselines_csv)
         windows = _window_bounds(obs_end)
+        baselines_tenths = [_window_baseline_tenths(monthly, ws, we) for ws, we in windows]
         urls = _source_urls(lat, lon, first_day, obs_end)
 
         def leader_fn():
-            obs = [(n, _observe_source(n, u, windows, baseline_tenths)) for n, u in urls]
+            obs = [(n, _observe_source(n, u, windows, baselines_tenths)) for n, u in urls]
             return _corroborate(obs)
 
         def validator_fn(leaders_res: gl.vm.Result) -> bool:
             if not isinstance(leaders_res, gl.vm.Return):
                 return False  # leader error: force rotation, never ratify
-            mine = leader_fn()
             theirs = leaders_res.calldata
-            # EXACT discrete-tier equality. No tolerance band exists.
-            if int(theirs["tier"]) != int(mine["tier"]):
+            # Whole-payload structure and bounds first: a malformed or
+            # injected payload is rejected without being compared to anything.
+            if not _payload_ok(theirs):
                 return False
-            return int(theirs["tier"]) in (-1, 0, 1, 2, 3)
+            mine = leader_fn()
+            if not _payload_ok(mine):
+                return False
+            # EXACT discrete-tier equality. No tolerance band exists.
+            return int(theirs["tier"]) == int(mine["tier"])
 
         res = gl.vm.run_nondet(leader_fn, validator_fn)
+        # Defence in depth: only a payload that passes the same strict check the
+        # validators applied may reach storage.
+        if not _payload_ok(res):
+            raise gl.vm.UserError(f"{ERR_EXTERNAL} malformed consensus payload")
         tier = int(res["tier"])
-        if tier not in TIER_LABEL:
-            raise gl.vm.UserError(f"{ERR_EXTERNAL} invalid tier")
 
         evals = (int(prior.evaluations) if prior is not None else 0) + 1
         payout = 0
@@ -675,7 +829,7 @@ class AetherClaim(gl.contract.Contract):
             outcome=outcome,
             median_deficit=int(res["median_deficit"]),
             source_count=int(res["source_count"]),
-            reasoning=str(res["reasoning"])[:400],
+            reasoning=_canonical_reasoning(tier, int(res["median_deficit"]), int(res["source_count"])),
             approved_payout=payout,
             vested_amount=0,
             last_release_timestamp=0,

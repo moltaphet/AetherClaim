@@ -1,6 +1,6 @@
 "use client";
 import { useCallback, useEffect, useState } from "react";
-import { api, GENESIS_PLOTS, Plot, tierForDeficit, TIERS } from "@/lib/contract";
+import { api, GENESIS_PLOTS, Plot, tierForDeficit, TIERS, windowBaselineMm } from "@/lib/contract";
 
 interface Reading {
   name: string;
@@ -66,12 +66,17 @@ export default function TelemetryRadar({ plotId }: { plotId: string | null }) {
     const lon = plot.longitude.toFixed(4);
     const om = (host: string, path: string, extra = "") =>
       `https://${host}${path}?latitude=${lat}&longitude=${lon}&start_date=${iso(start)}&end_date=${iso(end)}&daily=precipitation_sum&timezone=UTC${extra}`;
-    const baseTenths = plot.baseline_rainfall_mm * 10;
+    // Each window is judged against the baseline of the month its midpoint falls in.
+    const baseTenths = [0, 1].map((w) => {
+      const mid = new Date(start.getTime() + (w * 14 + 6.5) * 86400000);
+      return Math.round(windowBaselineMm(plot, mid.getUTCMonth() + 1) * 10);
+    });
 
     const toRow = (name: string, windows: number[], ms: number): Reading => {
-      const defs = windows.map((w) => {
+      const defs = windows.map((w, i) => {
         const t = Math.round(w * 10);
-        return t >= baseTenths ? 0 : Math.floor(((baseTenths - t) * 100) / baseTenths);
+        const b = baseTenths[i];
+        return b <= 0 || t >= b ? 0 : Math.floor(((b - t) * 100) / b);
       });
       return { name, status: "ok", ms, windowMm: windows, tier: tierForDeficit(Math.min(...defs)) };
     };

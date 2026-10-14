@@ -4,7 +4,7 @@
 export const CHAIN_ID = 61997;
 export const CHAIN_ID_HEX = "0xf22d";
 export const CONTRACT_ADDRESS =
-  process.env.NEXT_PUBLIC_AETHER_CLAIM_ADDRESS ?? "0xD368f35b238d84Bfd1024441992Cc2d04276bf79";
+  process.env.NEXT_PUBLIC_AETHER_CLAIM_ADDRESS ?? "0x9066D38A81FE5fE84b10c8dF9C4557b04bC26D83";
 
 // Primary first, fallback second. Both serve chain 61997.
 export const RPC_URLS = [
@@ -275,9 +275,11 @@ export interface Plot {
   longitude: number;
   latitude_e4: number;
   longitude_e4: number;
-  baseline_rainfall_mm: number;
+  monthly_baselines: number[]; // expected mm, Jan..Dec
   cadastral_hash: string;
   crop_cycle: string;
+  crop_cycle_start_month: number;
+  crop_cycle_end_month: number;
   active: boolean;
   registered_at: number;
 }
@@ -314,22 +316,58 @@ export interface Pool {
   epoch: number;
   epoch_exposure: string;
   max_epoch_exposure: string;
+  total_lp_shares: string;
+  share_price_atto: string;
+}
+
+// Pre-seeded genesis state (mirrors GENESIS_PLOTS in contracts/aether_claim.py).
+export const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+export const DAYS_PER_MONTH = 30;
+export const WINDOW_DAYS = 14;
+export const STAGING_DELAY_DAYS = 7;
+
+export function monthInCycle(month: number, start: number, end: number): boolean {
+  return start <= end ? month >= start && month <= end : month >= start || month <= end;
+}
+
+/** Mirror of the contract's coverage check: every month the 90-day term touches must be in-cycle. */
+export function termInsideCycle(p: Pick<Plot, "crop_cycle_start_month" | "crop_cycle_end_month">, from = new Date()): boolean {
+  for (let d = 0; d <= 90; d += 7) {
+    const m = new Date(from.getTime() + d * 86400000).getUTCMonth() + 1;
+    if (!monthInCycle(m, p.crop_cycle_start_month, p.crop_cycle_end_month)) return false;
+  }
+  const m = new Date(from.getTime() + 90 * 86400000).getUTCMonth() + 1;
+  return monthInCycle(m, p.crop_cycle_start_month, p.crop_cycle_end_month);
+}
+
+/** Expected rain (mm) for one 14-day window whose midpoint falls in `month` (1..12). */
+export function windowBaselineMm(p: Pick<Plot, "monthly_baselines">, month: number): number {
+  return Math.floor((p.monthly_baselines[month - 1] * 10 * WINDOW_DAYS) / DAYS_PER_MONTH) / 10;
 }
 
 // Pre-seeded genesis state (mirrors GENESIS_PLOTS in contracts/aether_claim.py).
 export const GENESIS_PLOTS: Plot[] = [
-  { plot_id: "CV-ALMOND-01", name: "Central Valley Almond Basin", crop_type: "ALMOND", latitude: 36.6, longitude: -119.8, latitude_e4: 366000, longitude_e4: -1198000, baseline_rainfall_mm: 14, cadastral_hash: "7c1f0a52d19b3e6a8f4b0c2d9e57a31b6f8d40c7e92a5b1d3c68f0a47e2b9d15", crop_cycle: "Feb-Nov", active: true, registered_at: 0 },
-  { plot_id: "IA-CORN-01", name: "Iowa Corn Belt", crop_type: "CORN", latitude: 42.03, longitude: -93.82, latitude_e4: 420300, longitude_e4: -938200, baseline_rainfall_mm: 34, cadastral_hash: "b3a94e07c5d12f68a0e7b94c1d3f56a8e20c97b4d1f63a85c0e2b7194d6f3a08", crop_cycle: "Apr-Oct", active: true, registered_at: 0 },
-  { plot_id: "AND-OLIVE-01", name: "Andalusia Olive Groves", crop_type: "OLIVE", latitude: 37.38, longitude: -4.37, latitude_e4: 373800, longitude_e4: -43700, baseline_rainfall_mm: 21, cadastral_hash: "e51d7c3a9f08b246d1a5e83c70b9f4d2a6c18e5f307b94d2c1a8e6f05b3d7a49", crop_cycle: "Oct-Mar", active: true, registered_at: 0 },
+  { plot_id: "CV-ALMOND-01", name: "Central Valley Almond Basin", crop_type: "ALMOND", latitude: 36.6, longitude: -119.8, latitude_e4: 366000, longitude_e4: -1198000, monthly_baselines: [50, 45, 30, 20, 8, 2, 0, 0, 4, 15, 30, 45], cadastral_hash: "7c1f0a52d19b3e6a8f4b0c2d9e57a31b6f8d40c7e92a5b1d3c68f0a47e2b9d15", crop_cycle: "Feb-Nov", crop_cycle_start_month: 2, crop_cycle_end_month: 11, active: true, registered_at: 0 },
+  { plot_id: "IA-CORN-01", name: "Iowa Corn Belt", crop_type: "CORN", latitude: 42.03, longitude: -93.82, latitude_e4: 420300, longitude_e4: -938200, monthly_baselines: [25, 28, 55, 95, 120, 140, 115, 110, 85, 70, 50, 35], cadastral_hash: "b3a94e07c5d12f68a0e7b94c1d3f56a8e20c97b4d1f63a85c0e2b7194d6f3a08", crop_cycle: "Apr-Oct", crop_cycle_start_month: 4, crop_cycle_end_month: 10, active: true, registered_at: 0 },
+  { plot_id: "AND-OLIVE-01", name: "Andalusia Olive Groves", crop_type: "OLIVE", latitude: 37.38, longitude: -4.37, latitude_e4: 373800, longitude_e4: -43700, monthly_baselines: [60, 55, 50, 45, 30, 10, 2, 3, 25, 60, 75, 70], cadastral_hash: "e51d7c3a9f08b246d1a5e83c70b9f4d2a6c18e5f307b94d2c1a8e6f05b3d7a49", crop_cycle: "Oct-Mar", crop_cycle_start_month: 10, crop_cycle_end_month: 3, active: true, registered_at: 0 },
 ];
 export const GENESIS_POOL: Pool = {
   pool_balance: "0", total_liabilities: "0", committed_payouts: "0", free_capital: "0",
   epoch: 0, epoch_exposure: "0", max_epoch_exposure: (5n * ATTO).toString(),
+  total_lp_shares: "0", share_price_atto: ATTO.toString(),
 };
+
+export interface LpPosition {
+  shares: string;
+  value: string;
+  total_shares: string;
+}
 
 export const api = {
   plots: () => readOr<Plot[]>("list_plots", [], GENESIS_PLOTS),
   pool: () => readOr<Pool>("get_pool", [], GENESIS_POOL),
   policies: (holder: string) => readOr<Policy[]>("list_policies", [holder], []),
+  lp: (holder: string) =>
+    readOr<LpPosition>("get_lp", [holder], { shares: "0", value: "0", total_shares: "0" }),
   claim: (id: string) => readOr<Claim | Record<string, never>>("get_claim", [id], {}),
 };

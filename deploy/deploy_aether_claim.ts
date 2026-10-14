@@ -91,32 +91,8 @@ export default async function main(client: Client): Promise<string> {
   if (!address) throw new Error(`No contract address in receipt: ${JSON.stringify(receipt, jsonSafe)}`);
   console.log(`AetherClaim deployed at ${address}`);
 
-  // Verify the genesis registry came up authenticated and active.
-  const plots = (await client.readContract({ address, functionName: "list_plots", args: [] })) as unknown;
-  const list = Array.isArray(plots) ? plots : [];
-  console.log(`Genesis registry: ${list.length} plots`);
-  for (const p of list as Array<Record<string, unknown>>) {
-    const m = p instanceof Map ? Object.fromEntries(p as Map<string, unknown>) : p;
-    console.log(`  - ${m.plot_id}  ${m.name}  active=${m.active}`);
-  }
-
-  // Seed underwriting liquidity so policies can be written immediately.
-  const seedHash = await client.writeContract({
-    address,
-    functionName: "provide_liquidity",
-    args: [],
-    value: SEED_LIQUIDITY,
-    fees,
-  });
-  const seed = await client.waitForTransactionReceipt({ hash: seedHash, waitUntil: "decided", retries: RETRIES });
-  console.log(`Liquidity seed ${ok(seed) ? "accepted" : "NOT accepted"} (${seedHash})`);
-
+  // Persist the address first: a flaky read below must never lose a live deploy.
   mkdirSync(path.resolve(process.cwd(), "deployments"), { recursive: true });
-  if (client.getContractSchema) {
-    const schema = await client.getContractSchema(address);
-    writeFileSync(path.resolve(process.cwd(), ABI_PATH), JSON.stringify(schema, jsonSafe, 2));
-    console.log(`ABI written to ${ABI_PATH}`);
-  }
   writeFileSync(
     path.resolve(process.cwd(), DEPLOYMENT_PATH),
     JSON.stringify(
@@ -126,13 +102,48 @@ export default async function main(client: Client): Promise<string> {
         rpc: "https://studio-next.genlayer.com/api",
         address,
         deployTx: hash,
-        seedLiquidityTx: seedHash,
         deployedAt: new Date().toISOString(),
       },
       jsonSafe,
       2,
     ),
   );
+
+  // Verify the genesis registry came up authenticated and active. Studio's
+  // gen_call has intermittently failed server-side, so this is best-effort.
+  try {
+    const plots = (await client.readContract({ address, functionName: "list_plots", args: [] })) as unknown;
+    const list = Array.isArray(plots) ? plots : [];
+    console.log(`Genesis registry: ${list.length} plots`);
+    for (const p of list as Array<Record<string, unknown>>) {
+      const m = p instanceof Map ? Object.fromEntries(p as Map<string, unknown>) : p;
+      console.log(`  - ${m.plot_id}  ${m.name}  active=${m.active}`);
+    }
+  } catch (e) {
+    console.log(`Registry read-back skipped (Studio read error): ${(e as Error).message?.slice(0, 120)}`);
+  }
+
+  // Seed underwriting liquidity (mints the first LP shares). Best-effort too.
+  let seedHash = "";
+  try {
+    seedHash = await client.writeContract({
+      address,
+      functionName: "provide_liquidity",
+      args: [],
+      value: SEED_LIQUIDITY,
+      fees,
+    });
+    const seed = await client.waitForTransactionReceipt({ hash: seedHash, waitUntil: "decided", retries: RETRIES });
+    console.log(`Liquidity seed ${ok(seed) ? "accepted" : "NOT accepted"} (${seedHash})`);
+  } catch (e) {
+    console.log(`Liquidity seed failed: ${(e as Error).message?.slice(0, 160)}`);
+  }
+
+  if (client.getContractSchema) {
+    const schema = await client.getContractSchema(address);
+    writeFileSync(path.resolve(process.cwd(), ABI_PATH), JSON.stringify(schema, jsonSafe, 2));
+    console.log(`ABI written to ${ABI_PATH}`);
+  }
   console.log(`Set NEXT_PUBLIC_AETHER_CLAIM_ADDRESS=${address} in frontend/.env.local`);
   return address;
 }

@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
-import { api, GENESIS_PLOTS, fromAtto, Plot, Policy } from "@/lib/contract";
+import { api, GENESIS_PLOTS, fromAtto, monthInCycle, MONTHS, Plot, Policy, STAGING_DELAY_DAYS } from "@/lib/contract";
 import SyncBadge from "./SyncBadge";
 
 const CROP_GLYPH: Record<string, string> = { ALMOND: "◐", CORN: "▥", OLIVE: "◍" };
@@ -84,8 +84,8 @@ export default function PlotRegistry({
               <Field k="Crop" v={`${CROP_GLYPH[sel.crop_type] ?? "◇"} ${sel.crop_type}`} />
               <Field k="Latitude" v={sel.latitude.toFixed(4)} mono />
               <Field k="Longitude" v={sel.longitude.toFixed(4)} mono />
-              <Field k="Baseline / 14d" v={`${sel.baseline_rainfall_mm} mm`} mono />
-              <Field k="Crop cycle" v={sel.crop_cycle} />
+              <Field k="Annual baseline" v={`${sel.monthly_baselines.reduce((a, b) => a + b, 0)} mm`} mono />
+              <Field k="Insurable cycle" v={sel.crop_cycle} />
             </dl>
             <div>
               <div className="label">Cadastral boundary hash</div>
@@ -94,15 +94,29 @@ export default function PlotRegistry({
               </code>
             </div>
             <div>
-              <div className="label">Rainfall baseline</div>
-              <div className="mt-2 h-2 rounded-full bg-loam">
-                <div className="h-2 rounded-full bg-gradient-to-r from-cyan to-sprout" style={{ width: `${Math.min(100, sel.baseline_rainfall_mm * 2.5)}%` }} />
+              <div className="label">Monthly rainfall baseline (mm) · highlighted = insurable cycle</div>
+              <div className="mt-2 flex h-24 items-end gap-1">
+                {sel.monthly_baselines.map((mm, i) => {
+                  const max = Math.max(...sel.monthly_baselines, 1);
+                  const on = monthInCycle(i + 1, sel.crop_cycle_start_month, sel.crop_cycle_end_month);
+                  return (
+                    <div key={i} className="flex flex-1 flex-col items-center gap-1" title={`${MONTHS[i]}: ${mm} mm`}>
+                      <div
+                        className={`w-full rounded-t ${on ? "bg-gradient-to-t from-cyan to-sprout" : "bg-line"}`}
+                        style={{ height: `${Math.max(4, (mm / max) * 100)}%` }}
+                      />
+                      <span className={`font-mono text-[9px] ${on ? "text-cyan" : "text-mist/60"}`}>{MONTHS[i][0]}</span>
+                    </div>
+                  );
+                })}
               </div>
-              <div className="mt-1 font-mono text-[11px] text-mist">{sel.baseline_rainfall_mm} mm expected per 14-day window</div>
+              <p className="mt-1 font-mono text-[11px] text-mist">
+                Each 14-day window is judged against its own month. Off-season months cannot be insured.
+              </p>
             </div>
             <div className="flex flex-wrap gap-2">
               <span className={`rounded-full border px-3 py-1 font-mono text-xs ${sel.active ? "border-sprout text-sprout" : "border-wheat text-wheat"}`}>
-                {sel.active ? "ACTIVE · insurable" : "STAGED · 24h delay"}
+                {sel.active ? "ACTIVE · insurable" : `STAGED · ${STAGING_DELAY_DAYS}d delay`}
               </span>
               <span className="rounded-full border border-line px-3 py-1 font-mono text-xs text-mist">
                 {(() => {
@@ -125,7 +139,7 @@ export default function PlotRegistry({
             <div className="label">{p.crop_type}</div>
             <div className="mt-1 font-display text-lg">{p.name}</div>
             <div className="mt-2 font-mono text-xs text-mist">
-              {p.latitude.toFixed(2)}, {p.longitude.toFixed(2)} · {p.baseline_rainfall_mm} mm/14d
+              {p.latitude.toFixed(2)}, {p.longitude.toFixed(2)} · {p.crop_cycle}
             </div>
           </button>
         ))}

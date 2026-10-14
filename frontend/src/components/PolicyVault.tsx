@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useMemo, useState } from "react";
-import { api, ATTO, fromAtto, GENESIS_PLOTS, GENESIS_POOL, PREMIUM_BPS, Plot, Pool, TIERS, toAtto, writeCall } from "@/lib/contract";
+import { api, ATTO, fromAtto, GENESIS_PLOTS, GENESIS_POOL, PREMIUM_BPS, termInsideCycle, Plot, Pool, TIERS, toAtto, writeCall } from "@/lib/contract";
 import SyncBadge from "./SyncBadge";
 import WalletSimNote from "./WalletSimNote";
 import { useWallet } from "@/lib/useAether";
@@ -25,6 +25,8 @@ export default function PolicyVault({ plotId, onChange }: { plotId: string | nul
   }, [plotId]);
 
   const cov = useMemo(() => toAtto(coverage), [coverage]);
+  const selectedPlot = plots.find((p) => p.plot_id === plot) ?? plots[0];
+  const inSeason = selectedPlot ? termInsideCycle(selectedPlot) : true;
   const premium = (cov * PREMIUM_BPS) / 10000n;
 
   const buy = async () => {
@@ -92,9 +94,16 @@ export default function PolicyVault({ plotId, onChange }: { plotId: string | nul
           <Stat k="Term" v="90 days" />
         </div>
 
-        <button className="btn btn-solid mt-6 w-full" disabled={busy || cov <= 0n || (!!account && !chainOk)} onClick={buy}>
+        <button className="btn btn-solid mt-6 w-full" disabled={busy || cov <= 0n || !inSeason || (!!account && !chainOk)} onClick={buy}>
           {!account ? "Connect wallet to buy" : busy ? "Awaiting consensus…" : `Pay ${fromAtto(premium, 5)} GEN premium`}
         </button>
+        {!inSeason && selectedPlot && (
+          <p className="mt-3 rounded-lg border border-rust/40 px-3 py-2 text-xs text-rust">
+            Off-season: a 90-day term bought today would touch months outside {selectedPlot.name}&apos;s crop cycle
+            ({selectedPlot.crop_cycle}). The contract rejects it so ordinary dry seasons cannot be insured.
+          </p>
+        )}
+        <p className="mt-3 text-xs text-mist">The protocol admin address cannot hold policies (anti self-dealing).</p>
         <WalletSimNote />
         {msg && <p className={`mt-3 text-sm ${msg.ok ? "text-sprout" : "text-rust"}`}>{msg.text}</p>}
         <p className="mt-4 text-xs text-mist">

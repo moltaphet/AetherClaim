@@ -90,6 +90,17 @@
       "readonly": true,
       "ret": "dict"
     },
+    "get_lp": {
+      "params": [
+        [
+          "holder_hex",
+          "string"
+        ]
+      ],
+      "kwparams": {},
+      "readonly": true,
+      "ret": "dict"
+    },
     "get_plot": {
       "params": [
         [
@@ -139,7 +150,7 @@
       "params": [],
       "kwparams": {},
       "readonly": false,
-      "ret": "null",
+      "ret": "int",
       "payable": true
     },
     "release_payout": {
@@ -189,16 +200,20 @@
           "int"
         ],
         [
-          "baseline_rainfall_mm",
-          "int"
+          "monthly_baselines",
+          "array"
         ],
         [
           "cadastral_hash",
           "string"
         ],
         [
-          "crop_cycle",
-          "string"
+          "crop_cycle_start_month",
+          "int"
+        ],
+        [
+          "crop_cycle_end_month",
+          "int"
         ]
       ],
       "kwparams": {},
@@ -215,13 +230,13 @@
     "withdraw_liquidity": {
       "params": [
         [
-          "amount",
+          "shares_to_burn",
           "int"
         ]
       ],
       "kwparams": {},
       "readonly": false,
-      "ret": "null",
+      "ret": "int",
       "payable": false
     }
   }

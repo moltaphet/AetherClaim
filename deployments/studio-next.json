@@ -2,7 +2,9 @@
   "network": "GenLayer Studio Next",
   "chainId": 61997,
   "rpc": "https://studio-next.genlayer.com/api",
-  "address": "0xD368f35b238d84Bfd1024441992Cc2d04276bf79",
-  "deployedAt": "2026-10-14",
-  "note": "constructor arg max_epoch_exposure=5 GEN; liquidity seed not yet sent"
+  "address": "0x9066D38A81FE5fE84b10c8dF9C4557b04bC26D83",
+  "deployTx": "0x39c1e822f87de1008b6429a6615ebd9351201bb6c1acfa971b7babe54257d45d",
+  "deployedAt": "2026-10-14T06:57:59.954Z",
+  "seedLiquidityTx": "0x48e38666755d627a1894805f0ffc4cd7ca690f0bff467a377db0b034472d774c",
+  "note": "audited contract (monthly baselines, LP share vault); constructor max_epoch_exposure=5 GEN; 0.5 GEN liquidity seed accepted"
 }
