@@ -377,19 +377,20 @@ class TestAdversarialProtection:
         uniform(env.vm, 7.1)
         assert env.vm.run_validator() is False
 
-    def test_validator_accepts_identical_readings_and_rejects_value_drift(self, env):
-        """Validators compare tier, source_count and median_deficit exactly. The
-        same readings agree. A reading that moves the deficit inside the same tier
-        (5.0 mm is 64%, 5.4 mm is 61%) is a different payload and is rejected, even
-        though the payout would be identical. That is the price of committing the
-        fields the contract acts on."""
+    def test_validator_tolerates_deficit_noise_but_not_drift(self, env):
+        """median_deficit is telemetry and may differ by up to 5 points between
+        validator runs. 5.0 mm is a 64% deficit and 5.4 mm is 61%: same tier, in
+        tolerance, accepted. 6.5 mm is 53%: same tier, but 11 points away, so it is
+        rejected as drift rather than noise."""
         pid = buy(env.c, env.vm, env.farmer)
         warp_to(env.vm, MATURITY + timedelta(hours=3))
         uniform(env.vm, TIER2)
         env.vm.sender = env.farmer
         env.c.evaluate_claim(pid)
-        assert env.vm.run_validator() is True  # same readings
-        uniform(env.vm, 5.4)  # same tier, different deficit
+        assert env.vm.run_validator() is True  # identical readings
+        uniform(env.vm, 5.4)  # 3 points
+        assert env.vm.run_validator() is True
+        uniform(env.vm, 6.5)  # 11 points, still tier 2
         assert env.vm.run_validator() is False
 
     def test_validator_rejects_leader_error(self, env):
@@ -796,7 +797,7 @@ class TestAuditRegressions:
         """Audit PoC (commit ab52505). Only two sources answer (tier 1). A leader
         forges source_count 3 with the agreeing tier to bypass the policyholder-only
         degraded-settlement guard. Tier equality alone accepted it. The validator
-        must now compare source_count and median_deficit as well."""
+        must now compare source_count exactly as well."""
         pid = buy(env.c, env.vm, env.farmer)
         warp_to(env.vm, MATURITY + timedelta(hours=3))
         mock_sources(env.vm, (TIER1, TIER1), gfs=None, nasa=(TIER3, TIER3))
@@ -807,7 +808,10 @@ class TestAuditRegressions:
         assert env.vm.run_validator(leader_result=honest) is True
         forged = {**honest, "source_count": 3}  # tier matches, count is a lie
         assert env.vm.run_validator(leader_result=forged) is False
-        assert env.vm.run_validator(leader_result={**honest, "median_deficit": 29}) is False
+        # median_deficit: 5 points of noise is tolerated, 6 is not. Tier and
+        # source_count carry the guarantees, so the forgery stays rejected above.
+        assert env.vm.run_validator(leader_result={**honest, "median_deficit": 33}) is True
+        assert env.vm.run_validator(leader_result={**honest, "median_deficit": 34}) is False
         assert env.vm.run_validator(leader_result={**honest, "median_deficit": 85}) is False
         assert env.vm.run_validator(leader_result={**honest, "extra": 1}) is False
 

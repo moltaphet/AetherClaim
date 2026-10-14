@@ -87,6 +87,11 @@ MIN_DEPOSIT = 10**15  # blocks first-depositor share-inflation dust attacks
 MIN_EXPOSURE_CAP = MIN_COVERAGE
 MAX_EXPOSURE_CAP = 100_000 * 10**18
 REASONING_MAX = 400
+# Validators may differ on median_deficit by this many points. Tier and
+# source_count stay exact. The deficit is telemetry: only the tier moves money, so
+# forecast-model updates or rounding between validator runs must not fail
+# consensus and starve the policyholder.
+DEFICIT_NOISE_TOLERANCE = 5
 DAYS_PER_MONTH = 30  # monthly baseline -> per-window baseline scaling
 SOURCE_COUNT = 3
 
@@ -915,15 +920,17 @@ class AetherClaim(gl.contract.Contract):
             mine = leader_fn()
             if not _payload_ok(mine):
                 return False
-            # EXACT equality of everything the contract acts on. source_count
-            # decides who may settle (degraded two-source results are
-            # policyholder-only), so a leader must not be able to claim three
-            # answering sources when only two did. Structure and int types were
-            # checked by _payload_ok above, before any cast.
+            # EXACT equality of what the contract acts on: tier (the money) and
+            # source_count (who may settle: degraded two-source results are
+            # policyholder-only, so a leader must not claim three answering
+            # sources when only two did). median_deficit is telemetry, compared
+            # within DEFICIT_NOISE_TOLERANCE. _payload_ok has already checked
+            # structure and int types, before any cast.
             return (
                 int(theirs["tier"]) == int(mine["tier"])
                 and int(theirs["source_count"]) == int(mine["source_count"])
-                and int(theirs["median_deficit"]) == int(mine["median_deficit"])
+                and abs(int(theirs["median_deficit"]) - int(mine["median_deficit"]))
+                <= DEFICIT_NOISE_TOLERANCE
             )
 
         res = gl.vm.run_nondet(leader_fn, validator_fn)
