@@ -1,0 +1,80 @@
+{
+  "schema": "AETHERCLAIM-CADASTRE-V1",
+  "plots": {
+    "CV-ALMOND-01": {
+      "name": "Central Valley Almond Basin",
+      "cadastral_hash": "eb190f10ac1e3fc5d10eb6f73859c0f3e6ce9cb0a4c0f32c51c39b588599946e",
+      "latitude_e4": 366000,
+      "longitude_e4": -1198000,
+      "monthly_baselines": [
+        50,
+        45,
+        35,
+        15,
+        8,
+        2,
+        0,
+        0,
+        4,
+        15,
+        25,
+        45
+      ],
+      "crop_cycle_start_month": 11,
+      "crop_cycle_end_month": 3,
+      "max_plot_coverage": "50000000000000000000",
+      "ghcnd_station": "USW00093193",
+      "eligible_policyholder": "0xbe43375329eb4a3cafc344f0e61859905aba2b36"
+    },
+    "IA-CORN-01": {
+      "name": "Iowa Corn Belt",
+      "cadastral_hash": "d4f49093f402d3c39709a761f3d45d00b6f2f1c313c123b32212d07c1dc19599",
+      "latitude_e4": 420300,
+      "longitude_e4": -938200,
+      "monthly_baselines": [
+        25,
+        28,
+        55,
+        95,
+        120,
+        140,
+        115,
+        110,
+        85,
+        70,
+        50,
+        35
+      ],
+      "crop_cycle_start_month": 4,
+      "crop_cycle_end_month": 10,
+      "max_plot_coverage": "50000000000000000000",
+      "ghcnd_station": "USC00130200",
+      "eligible_policyholder": "0xbe43375329eb4a3cafc344f0e61859905aba2b36"
+    },
+    "AND-OLIVE-01": {
+      "name": "Andalusia Olive Groves",
+      "cadastral_hash": "b89ac8d42c4cde8bd29c6a451b3c75f3710b0e412eccd19fe01aa9ecabe18e34",
+      "latitude_e4": 373800,
+      "longitude_e4": -43700,
+      "monthly_baselines": [
+        60,
+        55,
+        50,
+        45,
+        30,
+        10,
+        2,
+        3,
+        25,
+        60,
+        75,
+        70
+      ],
+      "crop_cycle_start_month": 10,
+      "crop_cycle_end_month": 3,
+      "max_plot_coverage": "50000000000000000000",
+      "ghcnd_station": "SP000008410",
+      "eligible_policyholder": "0xbe43375329eb4a3cafc344f0e61859905aba2b36"
+    }
+  }
+}
