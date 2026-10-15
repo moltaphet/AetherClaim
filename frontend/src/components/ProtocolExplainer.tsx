@@ -128,17 +128,17 @@ export default function ProtocolExplainer() {
           }
           summary={
             <>
-              Cover attaches only to plots the admin has registered, each with coordinates, a cadastral boundary hash,
-              a crop cycle and <b className="text-white">12 monthly rainfall baselines</b>. A policyholder cannot supply a
-              location or a URL.
+              Cover attaches only to a plot that validators have <b className="text-white">verified against a pinned
+              cadastral manifest</b> (coordinates, 12 monthly baselines, crop cycle, coverage cap, SHA-256 commitment),
+              and only the plot&apos;s registered operator can insure it. A policyholder cannot supply a location or a URL.
             </>
           }
           detail={
             <>
               Each 14-day window is judged against the baseline of its own month. A window expecting under{" "}
               <b className="text-white">{MIN_INSURABLE_BASELINE_MM} mm</b> cannot evidence a drought, so it reads 0%, and the
-              contract refuses to sell a term that contains one. New plots wait 7 days after staging, and the admin
-              address cannot hold policies.
+              contract refuses to sell a term that contains one. One live coverage window per plot, capped by the plot&apos;s
+              registered maximum. New plots wait 7 days after staging, and the admin address cannot hold policies.
             </>
           }
           open={!!open.registry}
@@ -152,14 +152,15 @@ export default function ProtocolExplainer() {
           icon={<RadarIcon />}
           badges={
             <>
-              <Badge>ERA5 · GFS · NASA POWER</Badge>
+              <Badge>ERA5 · NASA POWER · NOAA NCEI</Badge>
               <Badge tone="sprout">3 sources: median</Badge>
               <Badge tone="wheat">2 sources: holder only</Badge>
             </>
           }
           summary={
             <>
-              Validators independently fetch Open-Meteo ERA5, NOAA GFS and NASA POWER. With all three answering,{" "}
+              Validators independently fetch Open-Meteo ERA5, NASA POWER and a NOAA NCEI rain-gauge station, on three
+              different hostnames and operators. With all three answering,{" "}
               <b className="text-white">anyone</b> may settle at the median tier. With two, the lower tier settles only if{" "}
               <b className="text-white">the policyholder</b> accepts it. With fewer than two, the call is a quorum failure
               and can be retried.
@@ -167,9 +168,10 @@ export default function ProtocolExplainer() {
           }
           detail={
             <>
-              A third party can never lock the insured into a lower tier during an outage. Honest limit: two of the three
-              legs are served by Open-Meteo, so they are not independent infrastructure. A mainnet deployment needs
-              direct NOAA and ECMWF feeds.
+              A third party can never lock the insured into a lower tier during an outage. The contract refuses to run
+              if two sources share a hostname or an operator domain. Honest limit: ERA5 and NASA POWER both assimilate
+              satellite and station data, so they are independent infrastructure but not independent physics. The NOAA
+              gauge is the one ground-truth vote, and it can be tens of kilometres from the plot.
             </>
           }
           open={!!open.consensus}
@@ -189,8 +191,8 @@ export default function ProtocolExplainer() {
           }
           summary={
             <>
-              Only four payouts exist. Validators must agree on the exact tier, so every accepted evaluation moves
-              identical money.
+              Only four payouts exist. Every accepted evaluation moves one of these four amounts, and a boundary
+              disagreement is always settled toward the lower tier.
             </>
           }
           extra={
@@ -209,9 +211,11 @@ export default function ProtocolExplainer() {
           }
           detail={
             <>
-              Validators compare the tier and the source count exactly. A reading that lands in a different bucket on
-              another validator stalls consensus and rotates the leader. It never splits the payout. That is a
-              deliberate trade of boundary liveness for zero drift.
+              Validators compare the source count exactly and the deficit within 5 points. A leader at a lower tier is
+              accepted, a leader above a validator is not, so two validators straddling a threshold converge on the
+              lower tier instead of rotating forever. If a claim is still stuck, the policyholder can settle at the
+              guaranteed lower bound. During the 24h cooldown a payout can be re-priced, up or down, if the stations
+              revise their observations.
             </>
           }
           open={!!open.buckets}

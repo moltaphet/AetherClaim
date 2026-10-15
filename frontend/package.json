@@ -5,7 +5,8 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start"
+    "start": "next start",
+    "test": "node --test tests/underwriting.test.ts"
   },
   "dependencies": {
     "genlayer-js": "2.0.0-rc.1",

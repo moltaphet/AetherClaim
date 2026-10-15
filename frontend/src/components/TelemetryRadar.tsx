@@ -1,5 +1,6 @@
 "use client";
 import { useCallback, useEffect, useState } from "react";
+import { WEATHER_SOURCES } from "@/lib/underwriting";
 import {
   api,
   computeDeficitTier,
@@ -31,11 +32,12 @@ class DataError extends Error {}
 const iso = (d: Date) => d.toISOString().slice(0, 10);
 const cmp = (d: Date) => iso(d).replaceAll("-", "");
 
-// Same shape as the contract: 2 consecutive 14-day windows, newest day lagged 6d.
+// Same shape as the contract: 2 consecutive 14-day windows. The newest observed
+// day is lagged by the 10-day stabilisation period, so preliminary values have settled.
 function span() {
   const end = new Date();
   end.setUTCHours(0, 0, 0, 0);
-  end.setUTCDate(end.getUTCDate() - 6);
+  end.setUTCDate(end.getUTCDate() - 11);
   const start = new Date(end);
   start.setUTCDate(start.getUTCDate() - 27);
   return { start, end };
@@ -86,9 +88,9 @@ const label: Record<Status, string> = {
 export default function TelemetryRadar({ plotId }: { plotId: string | null }) {
   const [plot, setPlot] = useState<Plot | null>(GENESIS_PLOTS[0]);
   const [rows, setRows] = useState<Reading[]>([
-    { name: "Open-Meteo ERA5", status: "idle" },
-    { name: "NOAA GFS (Open-Meteo)", status: "idle" },
-    { name: "NASA POWER", status: "idle" },
+    { name: `ERA5 · ${WEATHER_SOURCES[0].host}`, status: "idle" },
+    { name: `NASA POWER · ${WEATHER_SOURCES[1].host}`, status: "idle" },
+    { name: `NOAA NCEI gauge · ${WEATHER_SOURCES[2].host}`, status: "idle" },
   ]);
   const [busy, setBusy] = useState(false);
 
@@ -139,8 +141,27 @@ export default function TelemetryRadar({ plotId }: { plotId: string | null }) {
         return classify(name, e);
       }
     };
+    const station = plot.ghcnd_station;
+    const ncei = async (): Promise<Reading> => {
+      const name = `NOAA NCEI gauge · ${WEATHER_SOURCES[2].host}`;
+      try {
+        if (!station) throw new DataError("plot has no GHCN-Daily station");
+        const u = `https://${WEATHER_SOURCES[2].host}/access/services/data/v1?dataset=daily-summaries&dataTypes=PRCP&stations=${station}&startDate=${iso(start)}&endDate=${iso(end)}&format=json&units=metric`;
+        const { json, ms } = await fetchJson(u);
+        if (!Array.isArray(json)) throw new DataError("unexpected response shape");
+        // A day with no GHCN-Daily row is a missing observation, never a dry day.
+        const byDate = new Map<string, unknown>();
+        for (const row of json as Array<Record<string, unknown>>) {
+          const n = typeof row.PRCP === "string" && row.PRCP !== "" ? Number(row.PRCP) : NaN;
+          if (typeof row.DATE === "string") byDate.set(row.DATE, Number.isFinite(n) ? n : null);
+        }
+        return toRow(name, strictWindows(byDate, start), ms);
+      } catch (e) {
+        return classify(name, e);
+      }
+    };
     const nasa = async (): Promise<Reading> => {
-      const name = "NASA POWER";
+      const name = `NASA POWER · ${WEATHER_SOURCES[1].host}`;
       try {
         const u = `https://power.larc.nasa.gov/api/temporal/daily/point?parameters=PRECTOTCORR&community=AG&longitude=${lon}&latitude=${lat}&start=${cmp(start)}&end=${cmp(end)}&format=JSON`;
         const { json, ms } = await fetchJson(u);
@@ -156,9 +177,9 @@ export default function TelemetryRadar({ plotId }: { plotId: string | null }) {
       }
     };
     const results = await Promise.all([
-      omFetch("Open-Meteo ERA5", om("archive-api.open-meteo.com", "/v1/archive")),
-      omFetch("NOAA GFS (Open-Meteo)", om("api.open-meteo.com", "/v1/forecast", "&models=gfs_seamless")),
+      omFetch(`ERA5 · ${WEATHER_SOURCES[0].host}`, om(WEATHER_SOURCES[0].host, "/v1/archive")),
       nasa(),
+      ncei(),
     ]);
     setRows(results);
     setBusy(false);
@@ -187,7 +208,7 @@ export default function TelemetryRadar({ plotId }: { plotId: string | null }) {
         <div className="flex items-center justify-between">
           <div>
             <div className="label">Live telemetry · {plot?.name ?? "…"}</div>
-            <p className="mt-1 text-xs text-mist">Live preview: two 14-day windows ending 6 days ago. A policy settles only on its own term&apos;s final 28 days, fixed at purchase.</p>
+            <p className="mt-1 text-xs text-mist">Live preview: two 14-day windows ending 11 days ago, three operators on three hosts. A policy settles only on its own term&apos;s final 28 days, fixed at purchase.</p>
           </div>
           <button className="btn" onClick={scan} disabled={busy || !plot}>
             {busy ? "Pinging…" : "Re-scan"}

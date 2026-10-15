@@ -64,7 +64,7 @@ function Dashboard() {
         <div className="mb-8 grid grid-cols-2 gap-3 sm:grid-cols-4">
           {[
             ["Payout tiers", "0 · 30 · 70 · 100%"],
-            ["Sources", "3 (2 share a host)"],
+            ["Sources", "3 hosts · 3 operators"],
             ["Cooldown", "24h"],
             ["Vesting", "3d linear"],
           ].map(([k, v]) => (

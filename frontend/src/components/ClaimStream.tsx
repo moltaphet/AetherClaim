@@ -15,6 +15,7 @@ import {
   writeCall,
 } from "@/lib/contract";
 import { useWallet } from "@/lib/useAether";
+import { canFinalize, conservativeTier, MAX_REVISIONS, revisionState } from "@/lib/underwriting";
 import SyncAlert from "./SyncAlert";
 import SyncBadge from "./SyncBadge";
 import WalletSimNote from "./WalletSimNote";
@@ -149,6 +150,11 @@ export default function ClaimStream({ refreshKey }: { refreshKey: number }) {
         const elapsed = claim && approved > 0n ? Math.max(0, Math.min(now - claim.cooldown_until, VEST)) : 0;
         const vestedNow = approved > 0n ? (approved * BigInt(elapsed)) / BigInt(VEST) : 0n;
         const releasableNow = vestedNow > vested ? vestedNow - vested : 0n;
+        const revision = revisionState(claim, now);
+        const finalizable = canFinalize(claim, now);
+        const matured = now >= policy.matures_at;
+        const inGrace = now <= policy.end_ts + EXPIRY_GRACE_DAYS * 86400;
+        const reserve = claim?.revision_reserve ? BigInt(claim.revision_reserve) : 0n;
         return (
           <article key={policy.policy_id} className="card p-5">
             <header className="flex flex-wrap items-center justify-between gap-3">
@@ -172,8 +178,25 @@ export default function ClaimStream({ refreshKey }: { refreshKey: number }) {
                 <Cell k="Validator agreement" v={`${claim.source_count}/3 sources`} />
                 <Cell k="Median deficit" v={`${claim.median_deficit}%`} />
                 <Cell k="Approved" v={`${fromAtto(approved, 4)} GEN`} />
-                <p className="font-mono text-[11px] text-wheat sm:col-span-4">{outcomeNote(claim.outcome, claim.source_count)}</p>
+                <p className="font-mono text-[11px] text-wheat sm:col-span-4">{outcomeNote(claim.outcome, claim.source_count, claim.settlement_mode)}</p>
+                {(claim.revisions ?? 0) > 0 && (
+                  <p className="font-mono text-[11px] text-cyan sm:col-span-4">
+                    re-priced {claim.revisions}× inside the cooldown after upstream observations were revised (max {MAX_REVISIONS})
+                  </p>
+                )}
+                {reserve > 0n && (
+                  <p className="font-mono text-[11px] text-mist sm:col-span-4">
+                    {fromAtto(reserve, 4)} GEN of coverage is still held back so a revision stays fundable. It is released
+                    when the cooldown ends.
+                  </p>
+                )}
                 <p className="font-mono text-[11px] text-mist sm:col-span-4">{claim.reasoning}</p>
+                {claim.payout_tier >= 0 && claim.settlement_mode !== "BOUNDARY_CONSERVATIVE" && conservativeTier(claim.median_deficit) < claim.payout_tier && (
+                  <p className="font-mono text-[11px] text-mist sm:col-span-4">
+                    deficit {claim.median_deficit}% sits within 5 points of a tier threshold: validators on either side
+                    converge on the lower tier, and the guaranteed lower bound would be tier {conservativeTier(claim.median_deficit)}.
+                  </p>
+                )}
               </div>
             )}
 
@@ -211,6 +234,44 @@ export default function ClaimStream({ refreshKey }: { refreshKey: number }) {
                     : now < policy.matures_at
                       ? `Opens ${new Date(policy.matures_at * 1000).toISOString().slice(0, 10)}`
                       : "Trigger consensus check"}
+                </button>
+              )}
+              {policy.status === "ACTIVE" && matured && inGrace && (
+                <button
+                  className="btn"
+                  disabled={!!busy || !chainOk}
+                  onClick={() => act("resolve_boundary_dispute", policy.policy_id)}
+                  title={`Policyholder-only fallback. Settles at the guaranteed lower bound: the tier of (deficit - 5 points), so a claim stuck at a tier threshold always settles.`}
+                >
+                  {busy === policy.policy_id + "resolve_boundary_dispute"
+                    ? "Resolving…"
+                    : "Settle at guaranteed lower bound"}
+                </button>
+              )}
+              {approved > 0n && revision === "open" && (
+                <button
+                  className="btn"
+                  disabled={!!busy || !chainOk}
+                  onClick={() => act("re_evaluate_revised_claim", policy.policy_id)}
+                  title="Re-reads all three sources. The payout moves only if the observations were materially revised."
+                >
+                  {busy === policy.policy_id + "re_evaluate_revised_claim" ? "Re-reading sources…" : "Re-check revised observations"}
+                </button>
+              )}
+              {approved > 0n && revision === "wait" && (
+                <span className="font-mono text-xs text-mist">revision check available shortly · cooldown {fmt(cooldown)} left</span>
+              )}
+              {approved > 0n && revision === "limit" && (
+                <span className="font-mono text-xs text-mist">revision limit reached</span>
+              )}
+              {finalizable && (
+                <button
+                  className="btn"
+                  disabled={!!busy || !chainOk}
+                  onClick={() => act("finalize_claim", policy.policy_id)}
+                  title="Releases the coverage held back for revisions to the pool"
+                >
+                  {busy === policy.policy_id + "finalize_claim" ? "Finalizing…" : "Finalize & release reserve"}
                 </button>
               )}
               {policy.status === "ACTIVE" && now > policy.end_ts + EXPIRY_GRACE_DAYS * 86400 && (

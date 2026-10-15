@@ -5,6 +5,7 @@ import SyncAlert from "./SyncAlert";
 import SyncBadge from "./SyncBadge";
 import WalletSimNote from "./WalletSimNote";
 import { useWallet } from "@/lib/useAether";
+import { BLOCKER_TEXT, buyBlockers, coverageLock, MATURITY_LAG_DAYS } from "@/lib/underwriting";
 
 export default function PolicyVault({ plotId, onChange }: { plotId: string | null; onChange: () => void }) {
   const { account, chainOk, connect } = useWallet();
@@ -15,9 +16,13 @@ export default function PolicyVault({ plotId, onChange }: { plotId: string | nul
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [poolLive, setPoolLive] = useState(false);
+  const [plotsLive, setPlotsLive] = useState(false);
 
   const load = () => {
-    api.plots().then((r) => setPlots(r.data));
+    api.plots().then((r) => {
+      setPlots(r.data);
+      setPlotsLive(r.live);
+    });
     api.pool().then((r) => {
       setPoolLive(r.live);
       if (r.live) setPool(r.data);
@@ -37,6 +42,12 @@ export default function PolicyVault({ plotId, onChange }: { plotId: string | nul
   const inSeason = selectedPlot ? termInsideCycle(selectedPlot) : true;
   const windowsPayable = selectedPlot ? termWindowsInsurable(selectedPlot) : true;
   const premium = (cov * PREMIUM_BPS) / 10000n;
+  // Underwriting gates mirrored from the contract. Only asserted from a live read:
+  // a cached registry says nothing about provenance, eligibility or locks.
+  const blockers = plotsLive
+    ? buyBlockers(selectedPlot, account, Math.floor(Date.now() / 1000), cov)
+    : [];
+  const lock = coverageLock(plotsLive ? selectedPlot : undefined, Math.floor(Date.now() / 1000));
 
   const buy = async () => {
     if (!account) return connect();
@@ -106,9 +117,21 @@ export default function PolicyVault({ plotId, onChange }: { plotId: string | nul
           <Stat k="Term" v="90 days" />
         </div>
 
-        <button className="btn btn-solid mt-6 w-full" disabled={busy || !parsed.ok || !inSeason || !windowsPayable || (!!account && !chainOk)} onClick={buy}>
+        <button className="btn btn-solid mt-6 w-full" disabled={busy || !parsed.ok || !inSeason || !windowsPayable || blockers.length > 0 || (!!account && !chainOk)} onClick={buy}>
           {!account ? "Connect wallet to buy" : busy ? "Awaiting consensus…" : `Pay ${fromAtto(premium, 5)} GEN premium`}
         </button>
+        {blockers.length > 0 && (
+          <ul className="mt-3 space-y-2">
+            {blockers.map((b) => (
+              <li key={b} className="rounded-lg border border-rust/40 px-3 py-2 text-xs text-rust">
+                <span className="font-mono">{b}</span> · {BLOCKER_TEXT[b]}
+                {b === "ERR_DUPLICATE_PLOT_COVERAGE" && lock.locked && (
+                  <> Cover on this plot runs until {new Date(lock.until * 1000).toISOString().slice(0, 10)}.</>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
         {!inSeason && selectedPlot && (
           <p className="mt-3 rounded-lg border border-rust/40 px-3 py-2 text-xs text-rust">
             Off-season: a 90-day term bought today would touch months outside {selectedPlot.name}&apos;s crop cycle
@@ -132,14 +155,16 @@ export default function PolicyVault({ plotId, onChange }: { plotId: string | nul
             it at purchase, because it could only ever settle at 0%. Choose a later start date.
           </p>
         )}
-        <p className="mt-3 text-xs text-mist">The protocol admin address cannot hold policies (anti self-dealing).</p>
+        <p className="mt-3 text-xs text-mist">The protocol admin address cannot hold policies (anti self-dealing). Only the plot&apos;s registered operator can insure it, and only once validators have verified the plot against the cadastral manifest.</p>
         <WalletSimNote />
         {notice && <p className={`mt-3 text-sm ${NOTICE_CLASS[notice.tone]}`}>{notice.text}</p>}
         <p className="mt-4 text-xs text-mist">
-          The verdict covers only the final 28 days of your term, fixed at purchase. Evaluation opens 6 days
-          after the term ends and stays open for {EXPIRY_GRACE_DAYS} days, so an outage cannot forfeit a claim.
-          A settled outcome is final. Three sources settle at the median for any caller. With only two, a third
-          party cannot settle you at the lower tier; only you can accept it. There are no daily re-checks.
+          The verdict covers only the final 28 days of your term, fixed at purchase. Evaluation opens {MATURITY_LAG_DAYS} days
+          after the last observed day, so preliminary data has settled, and stays open for {EXPIRY_GRACE_DAYS} days
+          after the term, so an outage cannot forfeit a claim. A settled payout can be re-priced, up or down, only
+          during its 24h cooldown if the stations revise the observations. Three sources, on three different
+          operators, settle at the median for any caller. With only two, a third party cannot settle you at the
+          lower tier; only you can accept it. There are no daily re-checks.
         </p>
       </div>
 

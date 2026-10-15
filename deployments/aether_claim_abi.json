@@ -4,6 +4,10 @@
       [
         "max_epoch_exposure",
         "int"
+      ],
+      [
+        "genesis_policyholder",
+        "string"
       ]
     ],
     "kwparams": {}
@@ -73,6 +77,18 @@
       "ret": "null",
       "payable": false
     },
+    "finalize_claim": {
+      "params": [
+        [
+          "policy_id",
+          "string"
+        ]
+      ],
+      "kwparams": {},
+      "readonly": false,
+      "ret": "null",
+      "payable": false
+    },
     "get_claim": {
       "params": [
         [
@@ -129,6 +145,12 @@
       "readonly": true,
       "ret": "dict"
     },
+    "get_weather_sources": {
+      "params": [],
+      "kwparams": {},
+      "readonly": true,
+      "ret": "array"
+    },
     "list_plots": {
       "params": [],
       "kwparams": {},
@@ -153,6 +175,18 @@
       "ret": "int",
       "payable": true
     },
+    "re_evaluate_revised_claim": {
+      "params": [
+        [
+          "policy_id",
+          "string"
+        ]
+      ],
+      "kwparams": {},
+      "readonly": false,
+      "ret": "dict",
+      "payable": false
+    },
     "release_payout": {
       "params": [
         [
@@ -163,6 +197,18 @@
       "kwparams": {},
       "readonly": false,
       "ret": "int",
+      "payable": false
+    },
+    "resolve_boundary_dispute": {
+      "params": [
+        [
+          "policy_id",
+          "string"
+        ]
+      ],
+      "kwparams": {},
+      "readonly": false,
+      "ret": "dict",
       "payable": false
     },
     "set_max_epoch_exposure": {
@@ -214,11 +260,35 @@
         [
           "crop_cycle_end_month",
           "int"
+        ],
+        [
+          "max_plot_coverage",
+          "int"
+        ],
+        [
+          "eligible_policyholder",
+          "string"
+        ],
+        [
+          "ghcnd_station",
+          "string"
         ]
       ],
       "kwparams": {},
       "readonly": false,
       "ret": "null",
+      "payable": false
+    },
+    "verify_plot_provenance": {
+      "params": [
+        [
+          "plot_id",
+          "string"
+        ]
+      ],
+      "kwparams": {},
+      "readonly": false,
+      "ret": "dict",
       "payable": false
     },
     "whoami": {

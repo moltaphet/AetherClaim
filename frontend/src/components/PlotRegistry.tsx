@@ -2,6 +2,8 @@
 import { useEffect, useState } from "react";
 import { api, GENESIS_PLOTS, fromAtto, MIN_INSURABLE_BASELINE_MM, monthInCycle, MONTHS, Plot, Policy, STAGING_DELAY_DAYS, windowInsurable } from "@/lib/contract";
 import SyncBadge from "./SyncBadge";
+import { useWallet } from "@/lib/useAether";
+import { coverageLock, eligibility, WEATHER_SOURCES } from "@/lib/underwriting";
 
 const CROP_GLYPH: Record<string, string> = { ALMOND: "◐", CORN: "▥", OLIVE: "◍" };
 
@@ -20,10 +22,15 @@ export default function PlotRegistry({
   // Never blank: start from the pre-seeded genesis registry, upgrade to live data.
   const [plots, setPlots] = useState<Plot[]>(GENESIS_PLOTS);
   const [policies, setPolicies] = useState<Policy[] | null>(null);
-  const err: string | null = null;
+  const [live, setLive] = useState(false);
+  const { account } = useWallet();
+  const nowSec = Math.floor(Date.now() / 1000);
 
   useEffect(() => {
-    api.plots().then((r) => setPlots(r.data));
+    api.plots().then((r) => {
+      setPlots(r.data);
+      setLive(r.live);
+    });
     api.policies("").then((r) => setPolicies(r.live ? r.data : null));
   }, []);
 
@@ -115,6 +122,7 @@ export default function PlotRegistry({
                 Each 14-day window is judged against its own month. Off-season months, and windows expecting under {MIN_INSURABLE_BASELINE_MM} mm, cannot pay.
               </p>
             </div>
+            <Provenance plot={sel} live={live} account={account} nowSec={nowSec} />
             <div className="flex flex-wrap gap-2">
               <span className={`rounded-full border px-3 py-1 font-mono text-xs ${sel.active ? "border-sprout text-sprout" : "border-wheat text-wheat"}`}>
                 {sel.active ? "ACTIVE · insurable" : `STAGED · ${STAGING_DELAY_DAYS}d delay`}
@@ -146,6 +154,59 @@ export default function PlotRegistry({
         ))}
       </div>
     </section>
+  );
+}
+
+function Provenance({ plot, live, account, nowSec }: { plot: Plot; live: boolean; account: string | null; nowSec: number }) {
+  // Provenance, eligibility and locks are on-chain facts. When the read did not
+  // succeed they are shown as unknown, never as verified.
+  const verified = live ? !!plot.provenance_verified : null;
+  const elig = live ? eligibility(plot, account) : "unknown";
+  const lock = coverageLock(live ? plot : undefined, nowSec);
+  const tag = (ok: boolean | null, yes: string, no: string, unknown: string) =>
+    ok === null ? (
+      <span className="rounded-full border border-line px-3 py-1 font-mono text-xs text-mist">{unknown}</span>
+    ) : ok ? (
+      <span className="rounded-full border border-sprout px-3 py-1 font-mono text-xs text-sprout">{yes}</span>
+    ) : (
+      <span className="rounded-full border border-rust px-3 py-1 font-mono text-xs text-rust">{no}</span>
+    );
+  return (
+    <div className="space-y-3 rounded-lg border border-line p-3">
+      <div className="label">Underwriting status</div>
+      <div className="flex flex-wrap gap-2">
+        {tag(verified, "PROVENANCE VERIFIED", "PROVENANCE UNVERIFIED · not insurable", "provenance · syncing")}
+        {tag(
+          elig === "unknown" ? null : elig === "eligible",
+          "ELIGIBLE · you are the operator",
+          "NOT ELIGIBLE · operator only",
+          account ? "eligibility · syncing" : "eligibility · connect wallet",
+        )}
+        {tag(live ? !lock.locked : null, "COVERAGE OPEN", `COVERAGE LOCKED · until ${new Date(lock.until * 1000).toISOString().slice(0, 10)}`, "coverage · syncing")}
+      </div>
+      <dl className="grid grid-cols-2 gap-3 text-xs">
+        <Field k="Registered operator" v={plot.eligible_policyholder ? `${plot.eligible_policyholder.slice(0, 8)}…${plot.eligible_policyholder.slice(-6)}` : "—"} mono />
+        <Field k="Plot coverage cap" v={plot.max_plot_coverage ? `${fromAtto(plot.max_plot_coverage, 2)} GEN` : "—"} mono />
+        <Field k="Unresolved on plot" v={plot.active_coverage !== undefined ? `${fromAtto(plot.active_coverage, 3)} GEN` : "—"} mono />
+        <Field k="Gauge station (NOAA)" v={plot.ghcnd_station ?? "—"} mono />
+      </dl>
+      {plot.provenance_manifest_sha256 && (
+        <div>
+          <div className="label">Manifest digest validators read</div>
+          <code className="mt-1 block break-all rounded bg-loam p-2 font-mono text-[10px] text-mist">{plot.provenance_manifest_sha256}</code>
+        </div>
+      )}
+      <div>
+        <div className="label">Three independent weather hosts</div>
+        <ul className="mt-1 space-y-1 font-mono text-[11px] text-mist">
+          {WEATHER_SOURCES.map((s) => (
+            <li key={s.key}>
+              <span className="text-cyan">{s.host}</span> · {s.operator}
+            </li>
+          ))}
+        </ul>
+      </div>
+    </div>
   );
 }
 

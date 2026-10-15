@@ -9,42 +9,80 @@ observed rainfall.
 |---|---|
 | Network | GenLayer Studio Next, chain `61997` |
 | RPC | `https://studio-next.genlayer.com/api` (fallback `studio-dev.genlayer.com/api`) |
-| **Contract (canonical)** | **`0x520928106203cb618A92841B1fD0A69978fE6Dc5`** |
-| Explorer | https://explorer-studio-next.genlayer.com/address/0x520928106203cb618A92841B1fD0A69978fE6Dc5 |
-| Deploy transaction | `0x68722d339d57fbba616b92bb81a26023dd095811575f11ce35b842246a14e0a4` (a transaction hash, not an address) |
-| Liquidity seed transaction | `0x7cf0d675c740a59bf9626d32747f6586cb2bdb3ba0ab8cda63e037306e39d89b` (a transaction hash, not an address) |
+| **Contract (canonical)** | **`0xA4c1eCC531d13486487827D40437FBF1E3CB8F2b`** |
+| Explorer | https://explorer-studio-next.genlayer.com/address/0xA4c1eCC531d13486487827D40437FBF1E3CB8F2b |
+| Source SHA-256 | `d56edd562a293f2f03f306d2ab2b676ffc79c933a8f4a4255e32eb6b0c56ca7f` (`contracts/aether_claim.py`) |
+| Deploy transaction | `0x822550426ce5de576896b116fc2f01a2e11060c4eb65c56ea9b26d47380fe77f` |
+| Plot provenance transactions | see `deployments/studio-next.json` → `provenanceTxs` |
+| Liquidity seed transaction (0.5 GEN) | `0x61795a2afde8b130569d36318342497670192adf4432ff9d2016d8f12737f93d` |
+| Live policy transaction (`create_policy`) | `0xc40ccc69f140e90e65aaeb0764bad7fe324cbef2c1c9a130d1b87abfed0954d0` |
+| Cadastral manifest (pinned) | `registry/cadastral_manifest.json` @ commit `3b39beb` |
 
 This is the only active deployment. Earlier iterations of this contract were
 deployed to other Studio Next addresses during development. They are
 **superseded and deprecated**, are not recorded here on purpose, and must not be
 used. `deployments/studio-next.json` always holds the canonical record.
 
-> **Deployment status (honest note).** This is the **round-8** build: validators
-> compare `tier` and `source_count` exactly and allow ±5 points of noise on
-> `median_deficit`, restoring liveness after round 7. It is deployed to Studio Next with the 0.5 GEN liquidity seed accepted
-> (`deployments/studio-next.json`). The served schema matches
-> `deployments/aether_claim_abi.json` (19 methods, identical name set). Studio's
-> `gen_call` read endpoint has been failing server-side (`Can't reconnect until
-> invalid transaction is rolled back`) for every contract, so the on-chain
-> genesis registry and pool state have **not been read back**. The frontend
-> falls back to cached genesis data until reads recover.
+> **Deployment status.** This is the steward-round build, deployed to Studio Next
+> and exercised live (`deployments/studio-next.json`):
+>
+> - **Plot provenance verified on-chain.** `verify_plot_provenance` was executed
+>   for all three genesis plots (`0x972332bc3f…`, `0x95b2922f8f…`,
+>   `0xd40e9fb224…`). A `list_plots` readback shows
+>   `provenance_verified: true` for each, with `provenance_manifest_sha256`
+>   `08adb6e9…` equal to the SHA-256 of `registry/cadastral_manifest.json`.
+> - **Liquidity.** 0.5 GEN seeded: `pool_balance` 0.5 GEN, `total_lp_shares` 0.5e18.
+> - **Live policy.** `P-1`, 0.1 GEN coverage on `AND-OLIVE-01`, signed by the
+>   registered operator (`0xbE43…2B36`), premium 0.008 GEN. Readback:
+>   `status: ACTIVE`, plot `coverage_locked: true`, pool `total_liabilities` 0.1 GEN.
+> - **Not exercised live:** `evaluate_claim`, `resolve_boundary_dispute`,
+>   `re_evaluate_revised_claim` and payout release. A policy only matures 100 days
+>   after purchase (`matures_at` 1800662400), so these are covered by the direct-mode
+>   suite only. The live validator network has **not** been observed settling a claim.
+>
+> **Correction to an earlier claim.** Earlier versions of this README blamed
+> Studio's `gen_call` for failing plot reads. The real cause was in the contract:
+> `get_plot`/`list_plots` returned a Python `float` (`latitude`), which GenVM cannot
+> calldata-encode. It was found during this round's first live deploy, fixed
+> (coordinates are now decimal strings), and is covered by
+> `TestViewReturnsAreCalldataEncodable`. Direct-mode tests never encode return
+> values, which is why 67 passing tests did not catch it. Because of it a first
+> deployment was superseded (recorded in `deployments/studio-next.json`).
+
+## 0. Steward review: requirement → change → evidence
+
+The hackathon steward marked the previous build "Action needed". Each item is
+answered below, with the test that proves it and what is **not** solved.
+
+| Steward requirement | What changed | Test / evidence | Honest limit |
+|---|---|---|---|
+| Independently verifiable plot provenance | `verify_plot_provenance(plot_id)`: validators fetch a manifest pinned to a **git commit** and match coordinates, 12 baselines, crop cycle, `max_plot_coverage`, GHCN station and eligible operator, and the stored `cadastral_hash` must be the SHA-256 of that record. Staging refuses a hash that does not commit to the record. A plot is not insurable until verified (`ERR_PROVENANCE_UNVERIFIED`) | `test_unverified_plot_provenance_cannot_be_insured` (9 field-level mismatches, outage, bad schema, forged validator payload), `test_cadastral_hash_must_commit_to_the_staged_record`, `test_genesis_plots_verify_against_independent_manifest`, `test_committed_manifest_file_verifies_every_genesis_plot` | The manifest is a file in this project's own GitHub repository. Pinning it to a commit makes it immutable and independently re-checkable, but it is **not a government land registry**, and the admin who wrote the plots also wrote the manifest. See "Provenance trust model" below |
+| Policyholder eligibility | Each plot binds one `eligible_policyholder`, carried in the manifest. `create_policy` reverts with `ERR_INELIGIBLE_POLICYHOLDER` for anyone else | `test_ineligible_policyholder_rejected_on_create_policy` | One operator per plot, set at staging. There is no on-chain operator change |
+| No duplicate coverage on a plot | One live coverage window per plot, and unresolved coverage on a plot may not exceed `max_plot_coverage`. Both revert with `ERR_DUPLICATE_PLOT_COVERAGE`. Settlement and expiry release the plot's coverage | `test_duplicate_overlapping_coverage_on_same_plot_rejected`, `test_expiry_releases_plot_coverage` | The lock is per `plot_id`. Two registry entries for the same physical parcel are prevented only by the manifest review, not by geometry |
+| Correlated weather sources | Three sources on **three hostnames and three operator domains**: Open-Meteo ERA5 (`archive-api.open-meteo.com`), NASA POWER (`power.larc.nasa.gov`), NOAA NCEI GHCN-Daily rain gauge (`www.ncei.noaa.gov`). The contract refuses to run a plan that repeats a hostname **or** an operator domain | `test_three_weather_sources_enforce_distinct_hostnames`, `test_contract_refuses_a_correlated_source_plan`, `test_station_gauge_is_a_real_third_vote` | ERA5 and NASA POWER both assimilate satellite and station data: independent infrastructure, not independent physics. The gauge can be tens of km from the plot (see §5) |
+| Persistent disagreement at tier boundaries | A validator accepts a leader whose deficit is within ±5 points and whose tier is **not above its own**. Validators on both sides of a threshold converge on the lower tier. Backstop: `resolve_boundary_dispute` settles at the guaranteed lower bound `tier(deficit − 5)` | `test_validators_straddling_tier_boundary_converge_without_liveness_deadlock`, `test_boundary_dispute_resolves_at_guaranteed_lower_bound`, `test_boundary_dispute_outage_is_retryable_not_final` | This lets a leader understate a tier by one step when the validator's own deficit is within 5 points above a threshold. Always toward LPs, bounded to ±5 points. See §2 |
+| Fair, recoverable claims under revisions | Evaluation opens **10 days** after the last observed day. During the 24h payout cooldown `re_evaluate_revised_claim` re-reads all three sources and re-prices the payout up or down. The unpaid part of the coverage stays reserved until the cooldown ends, so an upward revision is always fundable. `finalize_claim` releases it | `test_revised_observations_during_cooldown_fairly_update_settlement_tier`, `test_revision_noise_does_not_flip_the_payout`, `test_revision_needs_all_three_sources`, `test_revision_window_closes_when_streaming_begins`, `test_revision_count_is_bounded`, `test_maturity_lag_is_ten_days_after_the_last_observed_day` | Revisions after streaming begins are not recoverable. A revision needs all three sources, a tier change **and** a deficit move of more than 5 points |
+| Live deployment, liquidity, policy evidence, readbacks | See "Live evidence" below | `deployments/studio-next.json` | See the readback note below |
 
 ## 1. Architecture
 
 ```
             ┌────────────────────── AetherClaim contract ──────────────────────┐
+ Anyone ───▶│ verify_plot_provenance   validators ⇄ pinned cadastral manifest │
  LP ──GEN──▶│ provide_liquidity        pool_balance / total_liabilities        │
- Farmer ───▶│ create_policy(plot,cov)  plots{} (admin registry, 7-day staging) │
+ Operator ─▶│ create_policy(plot,cov)  verified + eligible + no overlap/cap    │
             │   refuses arid + off-season terms   policies{}  epoch_exposure{} │
  Anyone ───▶│ evaluate_claim ──────┐   claims{}                                │
             │                      ▼                                          │
             │   leader: 3 sources → per-source tier (lower of 2 windows)       │
             │           → aggregate: median of 3, lower of 2 → {tier, ...}     │
-            │   validators: re-run; tier + count exact, deficit within ±5     │
+            │   validators: count exact, deficit ±5, tier not above their own  │
+ Holder ───▶│ resolve_boundary_dispute  guaranteed lower bound tier(d − 5)     │
+ Anyone ───▶│ re_evaluate_revised_claim re-price inside the 24h cooldown       │
  Anyone ───▶│ release_payout   24h cooldown → 3-day linear vesting → holder    │
             └──────────────────────────────────────────────────────────────────┘
-   Open-Meteo ERA5 archive ── Open-Meteo GFS (NOAA model) ── NASA POWER
-   (two legs share one operator: see §5)
+   Open-Meteo ERA5 ── NASA POWER ── NOAA NCEI GHCN-Daily gauge  (3 operators)
+   manifest: raw.githubusercontent.com @ pinned commit
 ```
 
 | Deficit vs. baseline | Tier | Payout |
@@ -60,9 +98,10 @@ used. `deployments/studio-next.json` always holds the canonical record.
   final 28 days of its term**. `observation_end` is the last full day inside the
   term. `observation_start` is 27 days before it. Both are written at purchase and
   never move.
-- **Maturity.** The verdict may be taken only from `matures_at` = term end + 6
-  days, the reanalysis lag. Evaluation closes at term end + 30 days (the grace
-  period).
+- **Maturity.** The verdict may be taken only from `matures_at` = the end of the
+  last observed day + `MATURITY_LAG_DAYS` (**10 days**), so preliminary
+  satellite and reanalysis estimates have settled. Evaluation closes at term end
+  + 30 days (the grace period).
 - **Baselines.** Each window is judged against the baseline of **its own calendar
   month**, taken at the window midpoint: `window baseline = monthly_mm × 14 / 30`.
 - **Micro-baseline floor.** A window whose baseline is under **10 mm** cannot
@@ -102,29 +141,23 @@ occupied and front-run the insured's retries
 
 Examples, with per-source tiers listed:
 
-| Sources (ERA5 / GFS / NASA) | Settles at | Payout |
+| Sources (ERA5 / NASA / NCEI gauge) | Settles at | Payout |
 |---|---|---|
 | 3 / 3 / 0 | median 3 | 100% |
 | 3 / 1 / 1 | median 1 | 30% |
 | 3 / outage / 1 | lower of 3, 1 = 1 (policyholder only) | 30% |
 | 3 / 0 / outage | lower of 3, 0 = 0 (policyholder only) | 0%. See the limitation in §2 |
 
-> **Infrastructure Note on Quorum:** Both Open-Meteo ERA5 and GFS endpoints share
-> the same underlying hosting infrastructure. In this testnet deployment they
-> provide independent re-analysis vs forecast datasets, but represent a correlated
-> hosting dependency. For mainnet production, the source list should be extended
-> with direct enterprise gateways (for example dedicated NOAA enterprise feeds or
-> ECMWF APIs) to achieve full infrastructure diversification. None of these are
-> integrated yet. The endpoints are built inside the contract, so changing them
-> means a new deployment.
-
-**Infrastructure corroboration disclosure.** Both the Open-Meteo ERA5 leg and
-the Open-Meteo GFS leg originate from the same underlying hosting infrastructure.
-The "three sources" are therefore two infrastructure providers, not three, and a
-single host outage or fault can remove or corrupt two legs at once. Before a
-mainnet deployment, distinct independent endpoints should be integrated, such as
-direct NOAA enterprise feeds and ECMWF API access, to eliminate correlated host
-outages. The full discussion is in §5.
+**Source independence.** The three sources are served by three different
+operators on three different hostnames, and the contract enforces it with
+`_sources_independent`: every URL must be `https`, the three hostnames must be
+pairwise distinct, **and** the three registrable operator domains must be
+pairwise distinct (`open-meteo.com`, `nasa.gov`, `noaa.gov`). Checking hostnames
+alone is not enough: the previous design used `archive-api.open-meteo.com` and
+`api.open-meteo.com`, which are two hostnames of one operator.
+`test_three_weather_sources_enforce_distinct_hostnames` shows the old plan is
+rejected. The constructor also refuses to deploy a plan that fails the check.
+The full discussion, including what independence does and does not buy, is in §5.
 
 **Why the median and not the minimum of three.** The spec allowed "the
 conservative lower tier, or the median". The minimum of three is not safe here.
@@ -137,12 +170,48 @@ Over the same 512 cases the shipped rule raised it in **0**. See
 
 ## 2. Game-theoretic security & anti-exploit design
 
-**Economic non-determinism (TruScore flaw).** Validators never compare
-continuous values within a tolerance. Each validator recomputes the aggregated
-tier and the validator function requires `leader.tier == validator.tier`
-exactly. The payout is `coverage × {0, 3000, 7000, 10000} / 10000`, so any two
-validators that accept move identical money. Borderline cases (49% vs 50%
-deficit) are *rejected*, not averaged (`test_economic_drift_rejected_by_validator`).
+**Economic non-determinism (TruScore flaw) and boundary liveness.** The payout
+is `coverage × {0, 3000, 7000, 10000} / 10000`, so every accepted evaluation
+moves one of four fixed amounts. Earlier rounds compared `tier` for exact
+equality, which was safe against drift but had a liveness hole: two honest
+validators whose readings straddle a threshold (49% is Tier 1, 50% is Tier 2,
+both inside the ±5 telemetry band) rejected each other's leaders forever, and the
+policy could expire unpaid. The steward flagged this.
+
+The rule now is **monotone**. A validator accepts a leader payload when
+
+1. `source_count` is equal (it decides who may settle),
+2. `|leader.median_deficit − mine.median_deficit| ≤ 5`, and
+3. `leader.tier ≤ mine.tier`, where `leader.tier` is the tier of the leader's own
+   certified deficit (checked by `_payload_ok`).
+
+A leader **above** a validator's own tier is still rejected, so no accepted
+result is ever higher than what a validator sees
+(`test_economic_drift_rejected_by_validator`). A leader **at or below** is
+accepted. Two validators at 50% and 49% therefore converge on Tier 1 within one
+rotation: the leader that read 49% is accepted by both
+(`test_validators_straddling_tier_boundary_converge_without_liveness_deadlock`).
+The validator with the lowest view is always accepted by every other validator in
+the band, so rotation always reaches a leader that passes.
+
+**What this costs, stated plainly.** A leader may now report a tier one step below
+the truth when the true deficit is within 5 points above a threshold. That
+direction favours LPs, so it is a (bounded) leader-honesty assumption on the
+policyholder's side: it is possible only inside ±5 points of a threshold, never
+skips a tier (thresholds are 25 points apart), and can be corrected by
+`re_evaluate_revised_claim` only if the deficit later moves by more than the same
+5 points. An upward manipulation is impossible, because a leader above any
+validator is rejected.
+
+**Backstop: `resolve_boundary_dispute`.** If a claim is still stuck, the
+**policyholder** can call it. It settles at the *guaranteed lower bound*:
+`conservative_tier = tier(certified_deficit − 5)`. Validators accept it when the
+deficit is within the band and the tier is exactly that function of the leader's
+deficit, so consensus no longer depends on which side of a threshold a validator
+sits. Every validator that accepts it saw a tier at or above the paid tier. It
+is policyholder-only because it can pay **less** than `evaluate_claim` (at 28% it
+pays nothing, since 23% is Tier 0): it is a consented floor, not a default
+(`test_boundary_dispute_resolves_at_guaranteed_lower_bound`).
 
 **What validators compare.** The payload must carry exactly the four expected
 keys with integer types (checked before any cast). Then the leader's payload and
@@ -150,14 +219,12 @@ the validator's own run must match as follows:
 
 | Field | Comparison | Why |
 |---|---|---|
-| `tier` | exact | it is the economic outcome |
 | `source_count` | exact | it decides who may settle: a degraded two-source result is policyholder-only, and a leader must not be able to claim three answering sources when only two did (`test_validator_rejects_forged_source_count_payload`) |
-| `median_deficit` | within **±5 points** | telemetry. Only the tier moves money, so forecast-model updates or rounding between validator runs must not fail consensus and starve the policyholder (`test_validator_tolerates_deficit_noise_but_not_drift`) |
+| `median_deficit` | within **±5 points** | forecast-model updates or rounding between validator runs must not fail consensus and starve the policyholder (`test_validator_tolerates_deficit_noise_but_not_drift`) |
+| `tier` | leader's tier ≤ validator's tier, and it must equal the tier of the leader's own deficit | the economic outcome can never exceed what any accepting validator sees. `resolve_boundary_dispute` instead requires `tier == tier(deficit − 5)` |
+| outage (`-2`) | must be an outage for both | a leader cannot relabel an outage as a verdict |
 
-The ±5 band is a judgment call, not a derived constant. Drift beyond it (a source
-that has moved 11 points inside the same tier) is still rejected. Tier equality
-still guarantees both runs saw the same bucket, and `source_count` equality
-guarantees they saw the same sources.
+The ±5 band is a judgment call, not a derived constant.
 
 **Self-attack / moral hazard (PulseSLA flaw).**
 - *No arbitrary coordinates.* `create_policy` accepts only a `plot_id` present
@@ -189,10 +256,10 @@ The remaining timing levers, and how far they go:
   only lower the settled tier. That is why waiting for the third source is weakly
   better for the insured, and why only the insured may accept a degraded tier. The
   exhaustive sweep proves the monotonicity (`test_availability_cannot_raise_payout`).
-- **Data revisions can still move a retry.** If a source revises a historical
-  value during the grace period, a retry can read a different number. The
-  contract does not pin data versions. Settled outcomes are final, so only a
-  retry after an outage is exposed. See *Known limits*, item 2.
+- **Data revisions are handled in two places.** Before evaluation, the 10-day
+  stabilisation lag. After a payout is approved, the 24h cooldown allows
+  `re_evaluate_revised_claim` (see Known limits, item 2). A quorum-failure retry
+  can still read a revised value, because the first settlement is what is final.
 
 **Solvency & timing.**
 - Per-epoch (7d) coverage cap `max_epoch_exposure`, single-policy
@@ -239,22 +306,21 @@ is about how the realised payout tracks the risk the premium priced:
    policyholder accepts it (`test_two_source_split_settles_at_lower_reading_even_if_zero`).
    The "no wipe-out" guarantee holds in full only when three sources answer. A
    policyholder who waits is never worse off in tier terms.
-2. **Data revisions.** The contract assumes the historical values inside the fixed
-   windows are stable through the grace period. A revised value can change a
-   retry's result, for example by pulling a median toward a revised source.
-   Settled outcomes are final, so the exposure is limited to retries after
-   outages. Mitigations, none implemented: a keeper that evaluates at a fixed
-   time, or pinning the source snapshot on-chain.
-   **ERA5 re-analysis.** The ERA5 leg is a reanalysis product. ECMWF publishes
-   preliminary data within days and may later replace it with the validated
-   dataset, typically weeks to months afterwards. A value read at maturity can
-   therefore differ slightly from a later read. The fixed maturity is the safest
-   anchor available: windows are fixed at purchase, evaluation opens at a known
-   instant, and the first settlement is final, so a later ECMWF revision cannot
-   reopen a settled policy. It also means a settled outcome rests on the
-   preliminary figure.
-3. **Shared operator (see §5).** Two of the three legs are Open-Meteo. They are
-   not independent.
+2. **Data revisions.** The contract does not pin data versions. Three layers
+   limit the exposure. (a) Evaluation opens 10 days after the last observed day,
+   so preliminary ERA5 and NASA estimates have mostly settled. (b) A payout has a
+   24-hour cooldown, and inside it `re_evaluate_revised_claim` re-reads all three
+   sources and re-prices the payout up or down. (c) Noise is not a revision: the
+   tier must change **and** the deficit must move by more than 5 points, at most
+   3 times, so a payout cannot flap at a threshold. What is **not** covered:
+   ECMWF may replace preliminary ERA5 with validated data weeks or months later.
+   Once streaming begins the settlement is final, so a late revision cannot
+   reopen it. A settled outcome therefore rests on the data as it stood by day
+   10 plus the cooldown.
+3. **Independent operators, correlated physics (see §5).** The three sources are
+   three operators on three hostnames. ERA5 and NASA POWER both ingest satellite
+   and station observations, and the NCEI gauge can be tens of kilometres from the
+   plot.
 4. **Admin ban binds one address, not a person.** An admin can still use a second
    wallet. Use a multisig for the admin, and watch registry changes (plots are
    public for 7 days before activation).
@@ -263,19 +329,11 @@ is about how the realised payout tracks the risk the premium priced:
 6. **Weather sources are public APIs, not a hardware oracle.** NASA POWER is a
    reanalysis product with a publication lag. The premium is a flat 8% with no
    actuarial pricing.
-7. **Strict tier equivalence vs. boundary liveness.** `median_deficit` has a ±5
-   point telemetry tolerance, but `tier` is compared exactly. If two validators
-   read values that straddle a tier boundary (49% is Tier 1, 50% is Tier 2),
-   they disagree on the tier, consensus fails, and the leader rotates. This is an
-   intentional trade-off. It puts zero economic drift ahead of boundary liveness,
-   which is the steward's core requirement that no single policy can settle at
-   divergent payouts. The failure mode is a stall, never a split payout. A stall
-   is only possible when validators read different values, and it is bounded by
-   the grace period. If the disagreement persisted to day 30, the evaluation
-   window would close and the policy would expire without a payout, so a policy
-   whose reading sits on a boundary carries that risk. A bucketed or tolerant
-   tier comparison would remove the stall but would reintroduce divergent
-   payouts, so it is not offered.
+7. **Boundary resolution is asymmetric by design.** Validators accept a leader
+   at or below their own tier, never above. That removes the straddle deadlock but
+   lets a leader understate by one tier inside the ±5 band (see §2). The
+   conservative backstop `resolve_boundary_dispute` can pay less than
+   `evaluate_claim`, so only the policyholder may use it.
 8. **Not audited.** This is hackathon-grade code.
 
 ## 2b. Audit remediation
@@ -299,7 +357,14 @@ is about how the realised payout tracks the risk the premium priced:
 | 16 (round 6) | Any caller could settle a two-source result at `min(a, b)` during a one-source outage, locking the insured into a lower tier and removing their retry | Two-source (degraded) settlement is **policyholder-only**. Others get `QUORUM_FAILURE` and no state is written, so they cannot lock a tier or consume the retry rate limit. Three-source settlement stays permissionless. Regression: `test_third_party_cannot_force_lower_tier_settlement_on_outage`, `test_three_sources_settle_permissionlessly_at_median`, `test_policyholder_can_voluntarily_accept_degraded_two_source_settlement`, `test_third_party_outage_attempt_does_not_block_policyholder_retry` |
 
 | 17 (round 7) | Validators compared tier only, so a leader could forge `source_count: 3` on a two-source result and let a third party settle a degraded tier | Validators compare `tier` and `source_count` exactly, and require exactly the four payload keys. Regression: `test_validator_rejects_forged_source_count_payload` |
-| 18 (round 8) | Comparing `median_deficit` exactly (round 7) made validators fail consensus on harmless numeric noise, such as a GFS model update or rounding, starving policyholders | `median_deficit` is compared within **±5 points** (`DEFICIT_NOISE_TOLERANCE`). `tier` and `source_count` stay exact, so neither the payout nor the settle permission can be forged. Regression: `test_validator_tolerates_deficit_noise_but_not_drift` |
+| 18 (round 8) | Comparing `median_deficit` exactly (round 7) made validators fail consensus on harmless numeric noise, such as a GFS model update or rounding, starving policyholders | `median_deficit` is compared within **±5 points** (`DEFICIT_NOISE_TOLERANCE`). `source_count` stays exact, so the settle permission cannot be forged. (The exact-`tier` rule that originally accompanied this was relaxed to a monotone rule in row 23.) Regression: `test_validator_tolerates_deficit_noise_but_not_drift` |
+| 19 (steward) | Plot data was admin-typed text with no independent check | **`verify_plot_provenance`**: validators match the plot field by field to a manifest pinned to a git commit, and `cadastral_hash` must be the SHA-256 of the record. No plot is insurable until verified. Regression: `test_unverified_plot_provenance_cannot_be_insured`, `test_cadastral_hash_must_commit_to_the_staged_record` |
+| 20 (steward) | Anyone could buy cover on someone else's farmland | Each plot binds one `eligible_policyholder`. `create_policy` reverts `ERR_INELIGIBLE_POLICYHOLDER`. Regression: `test_ineligible_policyholder_rejected_on_create_policy` |
+| 21 (steward) | The same plot could be insured repeatedly | One live window per plot, and unresolved coverage capped at `max_plot_coverage`, `ERR_DUPLICATE_PLOT_COVERAGE`. Regression: `test_duplicate_overlapping_coverage_on_same_plot_rejected` |
+| 22 (steward) | Two of three sources were two hostnames of one operator | NOAA NCEI GHCN-Daily gauge replaces the GFS leg. `_sources_independent` demands distinct hostnames and operator domains, at deploy and at every evaluation. Regression: `test_three_weather_sources_enforce_distinct_hostnames`, `test_contract_refuses_a_correlated_source_plan` |
+| 23 (steward) | Validators straddling a tier threshold could rotate leaders until the claim expired unpaid | Monotone acceptance (leader at or below the validator's tier) plus the policyholder backstop `resolve_boundary_dispute`. Regression: `test_validators_straddling_tier_boundary_converge_without_liveness_deadlock`, `test_boundary_dispute_resolves_at_guaranteed_lower_bound` |
+| 24 (steward) | Upstream observations revised after settlement had no remedy | 10-day maturity lag, and `re_evaluate_revised_claim` inside the 24h cooldown with the unpaid coverage held in reserve until `finalize_claim`. Regression: `test_revised_observations_during_cooldown_fairly_update_settlement_tier` and four more (see §0) |
+
 **Deliberate deviation from the plain ERC-4626 formula.** A withdrawal pays
 `min(shares × pool / total_shares, shares × (pool − reserved) / total_shares)`.
 With only the first term, an LP could exit while a claim is still unrecognised
@@ -309,12 +374,12 @@ the leaver and the stayer end with identical value.
 
 ## 3. Verification & Testing
 
-### 3a. Reproducing the 67 direct-mode contract tests
+### 3a. Reproducing the 89 direct-mode contract tests
 
 The suite runs the contract in the **direct VM execution mode** of
 `genlayer-test` (gltest). The contract's Python executes in-process under the
 GenVM SDK, with **mocked HTTP adapters** (`direct_vm.mock_web`) standing in for
-the three weather sources, and `direct_vm.warp` for the block clock. That isolates
+the three weather sources and the cadastral manifest, and `direct_vm.warp` for the block clock. That isolates
 the economic logic from testnet flakiness, including the Studio database-session
 errors that currently break `gen_call` reads. It also means the suite does not
 exercise a live validator network, real source data or the wallet.
@@ -333,9 +398,9 @@ The contract's pinned runner (`py-genlayer:5jycge…`) ships in the `v0.6.0-rc5`
 tree. Without that version, gltest resolves the *latest* GenVM release and the
 runner is not found, so the pin matters.
 
-**Commands** (verified from an empty cache and a fresh virtualenv: 67 passed in
-2m26s, almost all of it the one-time runner download. A warm cache runs in about
-5 s.)
+**Commands** (the previous 67-test suite was verified from an empty cache and a
+fresh virtualenv in 2m26s, almost all of it the one-time runner download. This
+89-test suite was run on a warm cache, about 9 s.)
 
 ```bash
 # 1. virtualenv on Python 3.12
@@ -366,17 +431,40 @@ Notes:
 ### 3b. Other checks
 
 ```bash
-# deploy (CLI already configured with a funded account)
+# lint + SDK validation of the contract (24 methods: 10 view, 14 write)
+GENVM_VERSION=v0.6.0-rc5 genvm-lint check contracts/aether_claim.py
+
+# frontend: types, helper tests (incl. exhaustive parity with the contract), build
+cd frontend && npm install
+npx tsc --noEmit
+npm test                      # node --test tests/underwriting.test.ts
+npm run build
+
+# regenerate the Python <-> TypeScript parity vectors after a rule change
+UPDATE_PARITY=1 python -m pytest tests/test_aether_claim.py -k Parity
+
+# the manifest is generated and can be checked without a network
+python3 registry/build_manifest.py --check
+```
+
+**Reproducing the live run** (what produced `deployments/studio-next.json`):
+
+```bash
 genlayer network set studio-next
-genlayer deploy              # runs deploy/deploy_aether_claim.ts
+genlayer account use aetherclaim-admin          # admin / deployer
+genlayer deploy                                  # runs deploy/deploy_aether_claim.ts:
+                                                 #   deploy, verify_plot_provenance x3,
+                                                 #   provide_liquidity 0.5 GEN, readbacks
 
-# read checks (currently failing on Studio; see the deployment note)
-genlayer call 0x520928106203cb618A92841B1fD0A69978fE6Dc5 list_plots
-genlayer call 0x520928106203cb618A92841B1fD0A69978fE6Dc5 get_pool
-genlayer call 0x520928106203cb618A92841B1fD0A69978fE6Dc5 get_config
+# the policy must be signed by the ELIGIBLE operator, not the admin.
+# `genlayer deploy` runs every script in ./deploy of its cwd, so use a scratch dir:
+mkdir -p /tmp/run/deploy && cp scripts/create_sample_policy.ts /tmp/run/deploy/
+genlayer account use aetherclaim-farmer
+(cd /tmp/run && PROJECT_ROOT=$OLDPWD genlayer deploy)    # create_policy 0.1 GEN on AND-OLIVE-01
 
-# frontend
-cd frontend && npm install && npm run build && npm run dev
+genlayer call 0xA4c1eCC531d13486487827D40437FBF1E3CB8F2b list_plots
+genlayer call 0xA4c1eCC531d13486487827D40437FBF1E3CB8F2b get_pool
+genlayer call 0xA4c1eCC531d13486487827D40437FBF1E3CB8F2b get_policy --args P-1
 ```
 
 ## 4. Insurable calendar: Central Valley (Almond / winter crop)
@@ -404,43 +492,68 @@ All cycle windows clear the 10 mm floor (Nov 11.7 mm, Dec 21.0, Jan 23.3, Feb
 floor protects other plots and any future change to the data. The frontend shows
 the next insurable start date for the selected plot.
 
-## 5. Shared infrastructure disclosure
+## 5. Weather source independence
 
-Two of the three legs are served by the same operator. This is not independent
-redundancy, and it matters for the aggregation rule.
+| Leg | Endpoint | Operator | What it is |
+|---|---|---|---|
+| ERA5 archive | `archive-api.open-meteo.com/v1/archive` | Open-Meteo (ECMWF ERA5) | gridded reanalysis |
+| NASA POWER | `power.larc.nasa.gov/api/temporal/daily/point` | NASA Langley | satellite + model agroclimatology |
+| NOAA NCEI GHCN-Daily | `www.ncei.noaa.gov/access/services/data/v1` (`daily-summaries`, `PRCP`) | NOAA | ground **rain-gauge** station, pinned per plot |
 
-| Leg | Endpoint | Operator |
-|---|---|---|
-| ERA5 archive | `archive-api.open-meteo.com/v1/archive` | Open-Meteo |
-| GFS forecast (NOAA model) | `api.open-meteo.com/v1/forecast?models=gfs_seamless` | Open-Meteo |
-| NASA POWER | `power.larc.nasa.gov/api/temporal/daily/point` | NASA Langley |
+**What changed.** The previous second leg was the GFS forecast model served by
+the same operator as ERA5, so two votes came from one party. It is replaced by
+NOAA's GHCN-Daily gauge network, the only leg that is a physical measurement
+rather than a model or reanalysis. The contract refuses to run unless the three
+hostnames **and** the three operator domains are pairwise distinct.
 
-Consequences:
+**What this does not buy.**
 
-- **Two votes, one operator.** When both Open-Meteo legs agree, they decide the
-  median of three against NASA POWER alone. Two Open-Meteo legs at Tier 3 and
-  NASA at Tier 0 settle at Tier 3 (`test_single_low_outlier_is_outvoted`). This is
-  the intended "outvote a single faulty source" behaviour, but it means the two
-  legs are not three independent sources.
-- **Outage concentration.** An Open-Meteo outage removes two legs at once. Only
-  NASA POWER answers, which is below quorum, so claims enter retry until the grace
-  period ends.
-- **Compromise or bug.** A wrong unit or a compromised Open-Meteo service feeds
-  two agreeing values into the median, and the protocol cannot detect it from
-  inside.
+- **Independent infrastructure, not independent physics.** ERA5 and NASA POWER
+  both assimilate satellite and surface observations. They can share an upstream
+  error that a hostname check cannot see.
+- **Gauge representativeness.** A single GHCN station can be tens of kilometres
+  from the plot. Convective rain can hit the plot and miss the gauge, or the
+  reverse. The registry pins one station per plot, verified against the manifest,
+  and a plot whose station is unrepresentative will see the gauge outvoted or
+  outvoting.
+- **Missing days abstain.** A gauge day with no row is a missing observation, not
+  a dry day. The source drops out and the policy settles on two sources (the
+  holder-only degraded path).
+- **Publication lag.** GHCN-Daily and ERA5 are quality-controlled after the
+  fact. The 10-day lag and the cooldown revision window reduce, but do not
+  remove, that exposure (see §2, Known limits item 2).
 
-Production should diversify the GFS leg to a direct NOAA source (NOMADS/NWS) on
-an independent host, and add an independent archive such as Copernicus CDS
-(ERA5 direct). NASA POWER stays as the third leg.
+Not integrated, and recommended before real money: a second independent gauge
+per plot, and ECMWF's validated (non-preliminary) ERA5 product.
+
+### Provenance trust model
+
+`verify_plot_provenance` makes the registry **independently checkable**, not
+**authoritative**.
+
+- What it does prove: the on-chain plot matches, byte for byte in every
+  settlement-relevant field, a manifest that is immutable (pinned to commit
+  `3b39beb`), publicly fetchable by anyone, and whose cadastral hash is a
+  recomputable SHA-256. Validators, not the admin, perform the check, and any
+  address can trigger it.
+- What it does not prove: that the coordinates, baselines or operator are true.
+  The manifest is authored by the project. A real deployment needs the manifest
+  to be issued by a land registry or a licensed agronomist, signed, and the
+  operator binding to come from that authority. The contract is built so that
+  swapping `REGISTRY_MANIFEST_URL` for such a source needs no other change.
+- The admin cannot make a plot insurable by typing alone, and cannot alter a
+  verified plot, because no function mutates a verified record.
 
 ## 6. Layout
 
 ```
 contracts/aether_claim.py      Intelligent contract
+registry/                      cadastral manifest + generator (the provenance source)
 tests/                         pytest direct-mode suite (+ validator harness)
-deploy/deploy_aether_claim.ts  deploy + fee estimation + liquidity seed + ABI export
-deployments/                   ABI schema + deployment record
-frontend/                      Next.js 14 + Tailwind dapp
+scripts/create_sample_policy.ts live create_policy from the eligible operator
+deploy/deploy_aether_claim.ts  deploy + provenance verification + liquidity seed + readbacks + ABI export
+deployments/                   ABI schema + deployment record (tx hashes, readbacks)
+frontend/                      Next.js 14 + Tailwind dapp (+ tests/ helper + parity tests)
 ```
 
 Frontend notes: writes go through the injected EIP-1193 provider into the

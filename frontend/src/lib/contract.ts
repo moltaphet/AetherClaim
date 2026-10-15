@@ -4,7 +4,7 @@
 export const CHAIN_ID = 61997;
 export const CHAIN_ID_HEX = "0xf22d";
 export const CONTRACT_ADDRESS =
-  process.env.NEXT_PUBLIC_AETHER_CLAIM_ADDRESS ?? "0x520928106203cb618A92841B1fD0A69978fE6Dc5";
+  process.env.NEXT_PUBLIC_AETHER_CLAIM_ADDRESS ?? "0xA4c1eCC531d13486487827D40437FBF1E3CB8F2b";
 
 // Primary first, fallback second. Both serve chain 61997.
 export const RPC_URLS = [
@@ -410,6 +410,16 @@ export interface Plot {
   crop_cycle_end_month: number;
   active: boolean;
   registered_at: number;
+  // Underwriting hardening. Optional so a cached genesis fallback still typechecks.
+  max_plot_coverage?: string;
+  eligible_policyholder?: string;
+  ghcnd_station?: string;
+  provenance_verified?: boolean;
+  provenance_verified_at?: number;
+  provenance_manifest_sha256?: string;
+  active_coverage?: string;
+  last_coverage_end?: number;
+  coverage_locked?: boolean;
 }
 export interface Policy {
   policy_id: string;
@@ -423,7 +433,7 @@ export interface Policy {
   status: string;
   observation_start: number; // unix seconds, fixed at purchase
   observation_end: number;
-  matures_at: number; // evaluation opens here (term end + reanalysis lag)
+  matures_at: number; // evaluation opens here (last observed day + 10-day stabilisation lag)
 }
 export interface Claim {
   policy_id: string;
@@ -438,6 +448,13 @@ export interface Claim {
   cooldown_until: number;
   vesting_end: number;
   evaluated_at: number;
+  evaluations?: number;
+  revisions?: number;
+  revision_reserve?: string;
+  settlement_mode?: string;
+  finalized?: boolean;
+  revisable?: boolean;
+  revisable_until?: number;
 }
 export interface Pool {
   pool_balance: string;
@@ -457,7 +474,7 @@ export const DAYS_PER_MONTH = 30;
 export const WINDOW_DAYS = 14;
 export const STAGING_DELAY_DAYS = 7;
 export const MIN_INSURABLE_BASELINE_MM = 10; // windows expecting less rain cannot pay
-export const DATA_LAG_DAYS = 6;
+export const MATURITY_LAG_DAYS = 10; // evaluation opens this long after the last observed day
 export const TERM_DAYS = 90;
 export const EXPIRY_GRACE_DAYS = 30; // evaluation stays open this long after term end
 
@@ -541,10 +558,12 @@ export function computeDeficitTier(deficit: number): number {
 }
 
 // Pre-seeded genesis state (mirrors GENESIS_PLOTS in contracts/aether_claim.py).
+// Cached fallback only: provenance/eligibility are NOT asserted here, because they
+// are on-chain facts that a failed read must never be shown as true.
 export const GENESIS_PLOTS: Plot[] = [
-  { plot_id: "CV-ALMOND-01", name: "Central Valley Almond Basin", crop_type: "ALMOND", latitude: 36.6, longitude: -119.8, latitude_e4: 366000, longitude_e4: -1198000, monthly_baselines: [50, 45, 35, 15, 8, 2, 0, 0, 4, 15, 25, 45], cadastral_hash: "7c1f0a52d19b3e6a8f4b0c2d9e57a31b6f8d40c7e92a5b1d3c68f0a47e2b9d15", crop_cycle: "Nov-Mar", crop_cycle_start_month: 11, crop_cycle_end_month: 3, active: true, registered_at: 0 },
-  { plot_id: "IA-CORN-01", name: "Iowa Corn Belt", crop_type: "CORN", latitude: 42.03, longitude: -93.82, latitude_e4: 420300, longitude_e4: -938200, monthly_baselines: [25, 28, 55, 95, 120, 140, 115, 110, 85, 70, 50, 35], cadastral_hash: "b3a94e07c5d12f68a0e7b94c1d3f56a8e20c97b4d1f63a85c0e2b7194d6f3a08", crop_cycle: "Apr-Oct", crop_cycle_start_month: 4, crop_cycle_end_month: 10, active: true, registered_at: 0 },
-  { plot_id: "AND-OLIVE-01", name: "Andalusia Olive Groves", crop_type: "OLIVE", latitude: 37.38, longitude: -4.37, latitude_e4: 373800, longitude_e4: -43700, monthly_baselines: [60, 55, 50, 45, 30, 10, 2, 3, 25, 60, 75, 70], cadastral_hash: "e51d7c3a9f08b246d1a5e83c70b9f4d2a6c18e5f307b94d2c1a8e6f05b3d7a49", crop_cycle: "Oct-Mar", crop_cycle_start_month: 10, crop_cycle_end_month: 3, active: true, registered_at: 0 },
+  { plot_id: "CV-ALMOND-01", name: "Central Valley Almond Basin", crop_type: "ALMOND", latitude: 36.6, longitude: -119.8, latitude_e4: 366000, longitude_e4: -1198000, monthly_baselines: [50, 45, 35, 15, 8, 2, 0, 0, 4, 15, 25, 45], cadastral_hash: "eb190f10ac1e3fc5d10eb6f73859c0f3e6ce9cb0a4c0f32c51c39b588599946e", crop_cycle: "Nov-Mar", crop_cycle_start_month: 11, crop_cycle_end_month: 3, active: true, registered_at: 0, ghcnd_station: "USW00093193" },
+  { plot_id: "IA-CORN-01", name: "Iowa Corn Belt", crop_type: "CORN", latitude: 42.03, longitude: -93.82, latitude_e4: 420300, longitude_e4: -938200, monthly_baselines: [25, 28, 55, 95, 120, 140, 115, 110, 85, 70, 50, 35], cadastral_hash: "d4f49093f402d3c39709a761f3d45d00b6f2f1c313c123b32212d07c1dc19599", crop_cycle: "Apr-Oct", crop_cycle_start_month: 4, crop_cycle_end_month: 10, active: true, registered_at: 0, ghcnd_station: "USC00130200" },
+  { plot_id: "AND-OLIVE-01", name: "Andalusia Olive Groves", crop_type: "OLIVE", latitude: 37.38, longitude: -4.37, latitude_e4: 373800, longitude_e4: -43700, monthly_baselines: [60, 55, 50, 45, 30, 10, 2, 3, 25, 60, 75, 70], cadastral_hash: "b89ac8d42c4cde8bd29c6a451b3c75f3710b0e412eccd19fe01aa9ecabe18e34", crop_cycle: "Oct-Mar", crop_cycle_start_month: 10, crop_cycle_end_month: 3, active: true, registered_at: 0, ghcnd_station: "SP000008410" },
 ];
 export const GENESIS_POOL: Pool = {
   pool_balance: "0", total_liabilities: "0", committed_payouts: "0", free_capital: "0",
@@ -559,7 +578,18 @@ export interface LpPosition {
 }
 
 export const api = {
-  plots: () => readOr<Plot[]>("list_plots", [], GENESIS_PLOTS),
+  // The contract returns coordinates as decimal strings (GenVM calldata has no float).
+  plots: async () => {
+    const r = await readOr<Plot[]>("list_plots", [], GENESIS_PLOTS);
+    return {
+      ...r,
+      data: r.data.map((p) => ({
+        ...p,
+        latitude: Number(p.latitude_e4) / 10000,
+        longitude: Number(p.longitude_e4) / 10000,
+      })),
+    };
+  },
   pool: () => readOr<Pool>("get_pool", [], GENESIS_POOL),
   policies: (holder: string) => readOr<Policy[]>("list_policies", [holder], []),
   lp: (holder: string) =>
@@ -586,7 +616,10 @@ export function nextInsurableStart(p: Plot, from = new Date(), maxDays = 400): D
  * produced them: the median of three answering sources, or the conservative
  * lower of two.
  */
-export function outcomeNote(outcome: string, sourceCount: number): string {
+export function outcomeNote(outcome: string, sourceCount: number, mode?: string): string {
+  if (mode === "BOUNDARY_CONSERVATIVE" && outcome !== "QUORUM_FAILURE") {
+    return `guaranteed lower-bound tier (boundary resolution, ${sourceCount} sources) · revisable only inside the cooldown`;
+  }
   if (outcome === "QUORUM_FAILURE") return "too few sources, or a degraded 2-source reading not accepted · retry permitted until grace ends";
   if (outcome === "NORMAL") return "no drought · final, no payout";
   const basis = sourceCount === 3 ? "median of 3 sources" : "lower of 2 sources, accepted by the policyholder";

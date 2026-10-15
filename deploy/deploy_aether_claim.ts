@@ -8,11 +8,15 @@
  * `genlayer deploy` runs this file with a client already bound to the selected
  * network and account, so no key or chain object lives here.
  *
- * Seed registry: the three authenticated plots (Central Valley Almond Basin,
- * Iowa Corn Belt, Andalusia Olive Groves) are written into storage by the
- * contract constructor itself (GENESIS_PLOTS), so they are active from block
- * zero and the 24h staging delay only applies to plots added later. This
- * script verifies them by reading `list_plots` back.
+ * Seed registry: the three genesis plots (Central Valley Almond Basin, Iowa Corn
+ * Belt, Andalusia Olive Groves) are written into storage by the constructor
+ * (GENESIS_PLOTS), bound to the eligible farm operator named in
+ * registry/cadastral_manifest.json. They are NOT insurable until validators have
+ * matched each one to that manifest: this script sends one
+ * `verify_plot_provenance` transaction per plot and records the readback.
+ *
+ * The sample policy (`create_policy`) must be signed by the ELIGIBLE operator,
+ * not the admin, so it is a separate step (see README "Reproducing the live run").
  *
  * Fees: Studio Next has no on-chain FeeManager and the SDK resolves an absent
  * `fees` argument to a zero deposit, which the chain rejects with
@@ -20,12 +24,14 @@
  * the live fee policy; it is applied to the deploy and the liquidity seed.
  */
 
+import { createHash } from "crypto";
 import { readFileSync, writeFileSync, mkdirSync } from "fs";
 import path from "path";
 
 const CONTRACT_PATH = "contracts/aether_claim.py";
 const ABI_PATH = "deployments/aether_claim_abi.json";
 const DEPLOYMENT_PATH = "deployments/studio-next.json";
+const MANIFEST_PATH = "registry/cadastral_manifest.json";
 const RETRIES = 200;
 
 const MAX_EPOCH_EXPOSURE = 5n * 10n ** 18n; // 5 GEN of coverage per epoch
@@ -116,13 +122,24 @@ function addressFrom(r: Receipt): string | undefined {
 const jsonSafe = (_k: string, v: unknown) => (typeof v === "bigint" ? v.toString() : v);
 
 export default async function main(client: Client): Promise<string> {
-  const code = new Uint8Array(readFileSync(path.resolve(process.cwd(), CONTRACT_PATH)));
+  const codeBuf = readFileSync(path.resolve(process.cwd(), CONTRACT_PATH));
+  const code = new Uint8Array(codeBuf);
+  const sourceSha256 = createHash("sha256").update(codeBuf).digest("hex");
+  const manifestBuf = readFileSync(path.resolve(process.cwd(), MANIFEST_PATH));
+  const manifest = JSON.parse(manifestBuf.toString("utf8")) as {
+    plots: Record<string, { eligible_policyholder: string }>;
+  };
+  const plotIds = Object.keys(manifest.plots);
+  const operators = new Set(plotIds.map((id) => manifest.plots[id].eligible_policyholder.toLowerCase()));
+  if (operators.size !== 1) throw new Error("manifest must name exactly one genesis operator");
+  const genesisPolicyholder = [...operators][0];
+  console.log(`Source sha256 ${sourceSha256}; genesis operator ${genesisPolicyholder}`);
 
   await client.initializeConsensusSmartContract();
   const fees = await client.estimateTransactionFees({});
   console.log(`Estimated fee deposit: ${fees.feeValue} wei`);
 
-  const hash = await client.deployContract({ code, args: [MAX_EPOCH_EXPOSURE], fees });
+  const hash = await client.deployContract({ code, args: [MAX_EPOCH_EXPOSURE, genesisPolicyholder], fees });
   const receipt = await client.waitForTransactionReceipt({ hash, waitUntil: "decided", retries: RETRIES });
   const deployOutcome = assessReceipt(receipt);
   if (deployOutcome === "failed") throw new Error(`Deployment failed: ${JSON.stringify(receipt, jsonSafe)}`);
@@ -146,25 +163,34 @@ export default async function main(client: Client): Promise<string> {
         deployTx: hash,
         deployExecutionVerified: deployOutcome === "success",
         deployedAt: new Date().toISOString(),
+        sourcePath: CONTRACT_PATH,
+        sourceSha256,
+        manifestSha256: createHash("sha256").update(manifestBuf).digest("hex"),
+        genesisPolicyholder,
       },
       jsonSafe,
       2,
     ),
   );
 
-  // Verify the genesis registry came up authenticated and active. Studio's
-  // gen_call has intermittently failed server-side, so this is best-effort.
-  try {
-    const plots = (await client.readContract({ address, functionName: "list_plots", args: [] })) as unknown;
-    const list = Array.isArray(plots) ? plots : [];
-    console.log(`Genesis registry: ${list.length} plots`);
-    for (const p of list as Array<Record<string, unknown>>) {
-      const m = p instanceof Map ? Object.fromEntries(p as Map<string, unknown>) : p;
-      console.log(`  - ${m.plot_id}  ${m.name}  active=${m.active}`);
+  const record = () => JSON.parse(readFileSync(path.resolve(process.cwd(), DEPLOYMENT_PATH), "utf8"));
+  const save = (patch: Record<string, unknown>) =>
+    writeFileSync(path.resolve(process.cwd(), DEPLOYMENT_PATH), JSON.stringify({ ...record(), ...patch }, jsonSafe, 2));
+
+  // Independent plot provenance: validators fetch the pinned cadastral manifest and
+  // match every field. Permissionless; a mismatch leaves the plot uninsurable.
+  const provenanceTxs: Record<string, string> = {};
+  for (const plotId of plotIds) {
+    try {
+      const h = await client.writeContract({ address, functionName: "verify_plot_provenance", args: [plotId], fees });
+      const r = await client.waitForTransactionReceipt({ hash: h, waitUntil: "decided", retries: RETRIES });
+      provenanceTxs[plotId] = h;
+      console.log(`verify_plot_provenance(${plotId}): ${assessReceipt(r)} (${h})`);
+    } catch (e) {
+      console.log(`verify_plot_provenance(${plotId}) failed: ${(e as Error).message?.slice(0, 160)}`);
     }
-  } catch (e) {
-    console.log(`Registry read-back skipped (Studio read error): ${(e as Error).message?.slice(0, 120)}`);
   }
+  save({ provenanceTxs });
 
   // Seed underwriting liquidity (mints the first LP shares). Best-effort too.
   let seedHash = "";
@@ -183,19 +209,30 @@ export default async function main(client: Client): Promise<string> {
     );
     if (seedOutcome !== "failed") {
       // Record the seed alongside the deploy so the file is complete on its own.
-      const record = JSON.parse(readFileSync(path.resolve(process.cwd(), DEPLOYMENT_PATH), "utf8"));
-      writeFileSync(
-        path.resolve(process.cwd(), DEPLOYMENT_PATH),
-        JSON.stringify(
-          { ...record, seedLiquidityTx: seedHash, seedExecutionVerified: seedOutcome === "success" },
-          jsonSafe,
-          2,
-        ),
-      );
+      save({ seedLiquidityTx: seedHash, seedExecutionVerified: seedOutcome === "success" });
     }
   } catch (e) {
     console.log(`Liquidity seed failed: ${(e as Error).message?.slice(0, 160)}`);
   }
+
+  // Authoritative readbacks. Studio's gen_call has intermittently failed
+  // server-side, so each is best-effort and its failure is recorded verbatim.
+  const readbacks: Record<string, unknown> = {};
+  for (const [fn, args] of [
+    ["list_plots", []],
+    ["get_pool", []],
+    ["get_weather_sources", []],
+    ["get_config", []],
+  ] as Array<[string, unknown[]]>) {
+    try {
+      readbacks[fn] = await client.readContract({ address, functionName: fn, args });
+      console.log(`readback ${fn}: ok`);
+    } catch (e) {
+      readbacks[fn] = { error: (e as Error).message?.slice(0, 300) };
+      console.log(`readback ${fn} failed: ${(e as Error).message?.slice(0, 120)}`);
+    }
+  }
+  save({ readbacks, readbacksAt: new Date().toISOString() });
 
   if (client.getContractSchema) {
     const schema = await client.getContractSchema(address);
