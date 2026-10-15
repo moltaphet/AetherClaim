@@ -12,6 +12,7 @@ observed rainfall.
 | **Contract (canonical)** | **`0xA4c1eCC531d13486487827D40437FBF1E3CB8F2b`** |
 | Explorer | https://explorer-studio-next.genlayer.com/address/0xA4c1eCC531d13486487827D40437FBF1E3CB8F2b |
 | Source SHA-256 | `d56edd562a293f2f03f306d2ab2b676ffc79c933a8f4a4255e32eb6b0c56ca7f` (`contracts/aether_claim.py`) |
+| Exact deployed source | https://github.com/moltaphet/AetherClaim/blob/6d742cfbf3f6485ff3ee63c1fb69a85488d95213/contracts/aether_claim.py (SHA-256 above) |
 | Deploy transaction | `0x822550426ce5de576896b116fc2f01a2e11060c4eb65c56ea9b26d47380fe77f` |
 | Plot provenance transactions | see `deployments/studio-next.json` → `provenanceTxs` |
 | Liquidity seed transaction (0.5 GEN) | `0x61795a2afde8b130569d36318342497670192adf4432ff9d2016d8f12737f93d` |
