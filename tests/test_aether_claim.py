@@ -45,6 +45,11 @@ from conftest import (
     TIER1,
     TIER2,
     TIER3,
+    AUTHORITY_PUB,
+    AUTHORITY_SEED,
+    ROGUE_SEED,
+    attestation_for,
+    authority,
     buy,
     cadastral_digest,
     genesis_records,
@@ -55,6 +60,7 @@ from conftest import (
     provide,
     stage,
     uniform,
+    verify_plot,
     warp_to,
     _nasa_body,
     _ncei_body,
@@ -72,7 +78,7 @@ def _build_env(direct_vm, direct_deploy, alice, bob, charlie, verify):
     warp_to(direct_vm, T0 - timedelta(days=9))
     direct_vm.sender = alice  # deployer == admin
     farmer_hex = "0x" + bytes(charlie).hex()
-    c = direct_deploy(CONTRACT, 500 * ATTO, farmer_hex)
+    c = direct_deploy(CONTRACT, 500 * ATTO, farmer_hex, AUTHORITY_PUB)
     test_plots = [
         (TEST_PLOT, FLAT),
         (ARID_PLOT, ARID),
@@ -90,7 +96,7 @@ def _build_env(direct_vm, direct_deploy, alice, bob, charlie, verify):
     if verify:
         mock_manifest(direct_vm, records)
         for pid in records:
-            assert c.verify_plot_provenance(pid)["verified"] is True, pid
+            assert verify_plot(c, pid)["verified"] is True, pid
     provide(c, direct_vm, bob, 100 * ATTO)
 
     class E:
@@ -894,7 +900,7 @@ class TestUnderwritingHardening:
         mock_manifest(e.vm, records)
         e.vm.sender = e.lp  # verification is permissionless
         for pid, (_n, _c, lat, lon, monthly, cs, ce, station) in GENESIS.items():
-            res = e.c.verify_plot_provenance(pid)
+            res = verify_plot(e.c, pid)
             assert res["verified"] is True and res["code"] == "VERIFIED"
             plot = e.c.get_plot(pid)
             want = cadastral_digest(pid, lat, lon, monthly, cs, ce, GENESIS_MAX_COVERAGE, station)
@@ -919,7 +925,7 @@ class TestUnderwritingHardening:
         def attempt(records=None, status=200):
             mock_manifest(e.vm, records if records is not None else {"FARM-X": good}, status)
             e.vm.sender = e.lp
-            return e.c.verify_plot_provenance("FARM-X")
+            return verify_plot(e.c, "FARM-X")
 
         tampered = {
             "MISMATCH_LATITUDE": {**good, "latitude_e4": good["latitude_e4"] + 1},
@@ -939,17 +945,17 @@ class TestUnderwritingHardening:
         assert attempt(status=404)["code"] == "MANIFEST_UNAVAILABLE"
         e.vm.clear_mocks()
         e.vm.mock_web(URL_MANIFEST_RE, {"status": 200, "body": "not json"})
-        assert e.c.verify_plot_provenance("FARM-X")["code"] == "MANIFEST_UNREADABLE"
+        assert verify_plot(e.c, "FARM-X")["code"] == "MANIFEST_UNREADABLE"
         e.vm.clear_mocks()
         e.vm.mock_web(URL_MANIFEST_RE, {"status": 200, "body": '{"schema": "other", "plots": {}}'})
-        assert e.c.verify_plot_provenance("FARM-X")["code"] == "MANIFEST_SCHEMA"
+        assert verify_plot(e.c, "FARM-X")["code"] == "MANIFEST_SCHEMA"
         assert e.c.get_plot("FARM-X")["provenance_verified"] is False
         _expect_buy_revert(e, e.farmer, "FARM-X", "ERR_PROVENANCE_UNVERIFIED")
 
         # A leader cannot ratify a mismatch: validators re-read the manifest.
         mock_manifest(e.vm, {"FARM-X": tampered["MISMATCH_BASELINES"]})
         e.vm.sender = e.lp
-        e.c.verify_plot_provenance("FARM-X")
+        verify_plot(e.c, "FARM-X")
         forged = {"verified": True, "code": "VERIFIED", "manifest_sha256": "a" * 64}
         assert e.vm.run_validator(leader_result=forged) is False
         assert e.vm.run_validator(leader_result={"verified": True}) is False
@@ -958,7 +964,7 @@ class TestUnderwritingHardening:
         res = attempt({"FARM-X": good})
         assert res["verified"] is True
         assert e.c.get_plot("FARM-X")["provenance_verified"] is True
-        assert e.c.verify_plot_provenance("FARM-X")["code"] == "ALREADY_VERIFIED"
+        assert verify_plot(e.c, "FARM-X")["code"] == "ALREADY_VERIFIED"
         assert buy(e.c, e.vm, e.farmer, 10 * ATTO, plot="FARM-X").startswith("P-")
 
     def test_cadastral_hash_must_commit_to_the_staged_record(self, env):
@@ -1007,7 +1013,7 @@ class TestUnderwritingHardening:
         warp_to(e.vm, T0 + timedelta(days=7, minutes=1))
         e.c.activate_plot("CAPPED-01")
         mock_manifest(e.vm, {"CAPPED-01": manifest_record("CAPPED-01", 300000, -1000000, FLAT, 1, 12, 15 * ATTO, TEST_STATION, e.farmer_hex)})
-        assert e.c.verify_plot_provenance("CAPPED-01")["verified"] is True
+        assert verify_plot(e.c, "CAPPED-01")["verified"] is True
         start = T0 + timedelta(days=7, minutes=2)
         warp_to(e.vm, start)
         assert buy(e.c, e.vm, e.farmer, 10 * ATTO, plot="CAPPED-01") == "P-1"
@@ -1325,26 +1331,183 @@ class TestBoundaryAndRevisions:
 
 
 class TestCommittedRegistryManifest:
-    def test_committed_manifest_file_verifies_every_genesis_plot(self, direct_vm, direct_deploy, direct_alice):
+    def test_committed_manifest_and_attestations_verify_every_genesis_plot(self, direct_vm, direct_deploy, direct_alice):
         """registry/cadastral_manifest.json is the file validators fetch on the
-        live network. Deploy with its operator and verify every genesis plot
-        against its exact bytes."""
+        live network and registry/attestations.json holds the authority's
+        signatures. Deploy with the committed authority key and operator and
+        verify every genesis plot against the exact committed bytes."""
         import pathlib
 
-        path = pathlib.Path(__file__).resolve().parent.parent / "registry" / "cadastral_manifest.json"
-        raw = path.read_text()
+        reg = pathlib.Path(__file__).resolve().parent.parent / "registry"
+        raw = (reg / "cadastral_manifest.json").read_text()
         doc = json.loads(raw)
+        att = json.loads((reg / "attestations.json").read_text())
         operators = {r["eligible_policyholder"] for r in doc["plots"].values()}
         assert len(operators) == 1
         warp_to(direct_vm, T0)
         direct_vm.sender = direct_alice
-        c = direct_deploy(CONTRACT, 5 * ATTO, operators.pop())
+        c = direct_deploy(CONTRACT, 5 * ATTO, operators.pop(), att["authority_public_key"])
+        assert c.get_config()["cadastral_authority"] == att["authority_public_key"]
         direct_vm.mock_web(URL_MANIFEST_RE, {"status": 200, "body": raw})
+
+        # One plot's signature cannot be replayed on another.
+        with direct_vm.expect_revert("ERR_INVALID_CADASTRAL_ATTESTATION"):
+            a = att["attestations"]["AND-OLIVE-01"]
+            c.verify_plot_provenance("CV-ALMOND-01", a["registry_record_id"], a["signature"])
         for pid in doc["plots"]:
-            res = c.verify_plot_provenance(pid)
+            a = att["attestations"][pid]
+            res = c.verify_plot_provenance(pid, a["registry_record_id"], a["signature"])
             assert res["verified"] is True, (pid, res)
             assert res["manifest_sha256"] == hashlib.sha256(raw.encode()).hexdigest()
+            plot = c.get_plot(pid)
+            assert plot["registry_record_id"] == a["registry_record_id"]
+            assert plot["attestation_signature"] == a["signature"]
         assert all(p["provenance_verified"] for p in c.list_plots())
+
+
+class TestCadastralAttestation:
+    def test_fabricated_or_mismatched_plot_attestation_is_strictly_rejected(self, raw_env):
+        """A plot is insurable only if the independent cadastral authority signed
+        it. The manifest is project-controlled, so even a manifest that lists a
+        fabricated plot, a self-consistent cadastral hash, and an eligible
+        policyholder cannot make it insurable. Every fabricated, altered or
+        mismatched plot reverts with ERR_INVALID_CADASTRAL_ATTESTATION, writes
+        nothing, and cannot be insured."""
+        e = raw_env
+        ERR = "ERR_INVALID_CADASTRAL_ATTESTATION"
+        e.vm.sender = e.admin
+
+        # 1. FABRICATED: the admin invents a parcel. Its hash commits to its own
+        #    record and the (project-controlled) manifest even lists it, but the
+        #    authority never signed it.
+        fake = stage(e.c, "FAKE-FARM", FLAT, e.farmer_hex)
+        warp_to(e.vm, T0 + timedelta(days=7, minutes=1))
+        e.c.activate_plot("FAKE-FARM")
+        mock_manifest(e.vm, {"FAKE-FARM": fake})
+        genuine_rid, genuine_sig = attestation_for(e.c, "CV-ALMOND-01")  # a real authority signature, for ANOTHER plot
+        rogue_rid, rogue_sig = attestation_for(e.c, "FAKE-FARM", ROGUE_SEED)  # well-formed, wrong signer
+        flipped = ("0" if rogue_sig[0] != "0" else "1") + rogue_sig[1:]
+        attempts = {
+            "no signature": ("REC-1", ""),
+            "not hex": ("REC-1", "zz" * 64),
+            "truncated": ("REC-1", rogue_sig[:-2]),
+            "signed by someone else": (rogue_rid, rogue_sig),
+            "authority signature of another plot, replayed": (genuine_rid, genuine_sig),
+            "bit-flipped signature": (rogue_rid, flipped),
+            "separator injection in record id": ("A|B", rogue_sig),
+            "empty record id": ("", rogue_sig),
+        }
+        for label, (rid, sig) in attempts.items():
+            for caller in (e.admin, e.lp, e.farmer):  # permissionless, but nobody gets through
+                e.vm.sender = caller
+                with e.vm.expect_revert(ERR):
+                    e.c.verify_plot_provenance("FAKE-FARM", rid, sig)
+
+        # 2. MISMATCHED: the authority's genuine signature for genesis plot A
+        #    does not verify plot B, and does not verify A under another record id.
+        for target, donor in (("IA-CORN-01", "CV-ALMOND-01"), ("AND-OLIVE-01", "IA-CORN-01")):
+            rid, sig = attestation_for(e.c, donor)
+            with e.vm.expect_revert(ERR):
+                e.c.verify_plot_provenance(target, rid, sig)
+        rid, sig = attestation_for(e.c, "CV-ALMOND-01")
+        with e.vm.expect_revert(ERR):
+            e.c.verify_plot_provenance("CV-ALMOND-01", rid + "-X", sig)
+
+        # 3. ALTERED: the authority attested a real parcel; the admin stages the
+        #    same plot id with a different operator, or a different coverage cap.
+        #    Both change a signed field, so the signature no longer verifies.
+        e.vm.sender = e.admin
+        operator_swap = "0x" + "ab" * 20
+        e.c.stage_plot(
+            "ALTERED-OP", "x", "x", 300000, -1000000, FLAT,
+            cadastral_digest("ALTERED-OP", 300000, -1000000, FLAT, 1, 12, TEST_MAX_COVERAGE, TEST_STATION),
+            1, 12, TEST_MAX_COVERAGE, operator_swap, TEST_STATION,
+        )
+        honest_sig = authority.attest(
+            AUTHORITY_SEED, "TEST-REC-ALTERED-OP", "ALTERED-OP",
+            cadastral_digest("ALTERED-OP", 300000, -1000000, FLAT, 1, 12, TEST_MAX_COVERAGE, TEST_STATION),
+            e.farmer_hex,  # what the authority actually attested: the farmer is the operator
+        )
+        with e.vm.expect_revert(ERR):
+            e.c.verify_plot_provenance("ALTERED-OP", "TEST-REC-ALTERED-OP", honest_sig)
+        stage(e.c, "ALTERED-CAP", FLAT, e.farmer_hex, max_cov=TEST_MAX_COVERAGE * 10)
+        cap_sig = authority.attest(
+            AUTHORITY_SEED, "TEST-REC-ALTERED-CAP", "ALTERED-CAP",
+            cadastral_digest("ALTERED-CAP", 300000, -1000000, FLAT, 1, 12, TEST_MAX_COVERAGE, TEST_STATION),
+            e.farmer_hex,  # attested with the real cap; the staged plot claims a 10x cap
+        )
+        with e.vm.expect_revert(ERR):
+            e.c.verify_plot_provenance("ALTERED-CAP", "TEST-REC-ALTERED-CAP", cap_sig)
+
+        # 4. Nothing was written, and none of it can be insured.
+        for pid in ("FAKE-FARM", "ALTERED-OP", "ALTERED-CAP", "CV-ALMOND-01", "IA-CORN-01", "AND-OLIVE-01"):
+            plot = e.c.get_plot(pid)
+            assert plot["provenance_verified"] is False, pid
+            assert plot["registry_record_id"] == "" and plot["attestation_signature"] == "", pid
+            assert plot["provenance_manifest_sha256"] == "", pid
+        e.vm.clear_mocks()
+        _expect_buy_revert(e, e.farmer, "FAKE-FARM", "ERR_PROVENANCE_UNVERIFIED")
+        _expect_buy_revert(e, e.farmer, "CV-ALMOND-01", "ERR_PROVENANCE_UNVERIFIED")
+        assert e.c.list_policies("") == []
+        assert e.c.get_pool()["total_liabilities"] == "0"
+
+        # 5. Positive control: the authority's signature over the genuine record
+        #    verifies, binds the eligible policyholder, and only then can cover be bought.
+        mock_manifest(e.vm, genesis_records(e.farmer_hex))
+        e.vm.sender = e.lp
+        res = verify_plot(e.c, "AND-OLIVE-01")
+        assert res["verified"] is True and res["code"] == "VERIFIED"
+        plot = e.c.get_plot("AND-OLIVE-01")
+        assert plot["registry_record_id"] == "TEST-REC-AND-OLIVE-01"
+        warp_to(e.vm, datetime(2026, 10, 15, tzinfo=timezone.utc))  # inside the Oct-Mar crop cycle
+        _expect_buy_revert(e, e.lp, "AND-OLIVE-01", "ERR_INELIGIBLE_POLICYHOLDER")  # not the attested operator
+        assert buy(e.c, e.vm, e.farmer, 10 * ATTO, plot="AND-OLIVE-01").startswith("P-")
+        # The authority is fixed: nothing the admin can call changes it.
+        assert e.c.get_config()["cadastral_authority"] == AUTHORITY_PUB
+        assert not any(n for n in dir(e.c) if "authority" in n.lower() and n != "get_config")
+
+    @pytest.mark.parametrize("bad", ["", "00" * 31, "zz" * 32, "ff" * 32])  # empty, short, non-hex, not a curve point
+    def test_deployment_rejects_an_invalid_authority_key(self, direct_vm, direct_deploy, direct_alice, direct_charlie, bad):
+        warp_to(direct_vm, T0)
+        direct_vm.sender = direct_alice
+        with direct_vm.expect_revert("cadastral_authority"):
+            direct_deploy(CONTRACT, 5 * ATTO, "0x" + bytes(direct_charlie).hex(), bad)
+
+    def test_authority_key_is_normalised_and_exposed(self, direct_vm, direct_deploy, direct_alice, direct_charlie):
+        warp_to(direct_vm, T0)
+        direct_vm.sender = direct_alice
+        c = direct_deploy(CONTRACT, 5 * ATTO, "0x" + bytes(direct_charlie).hex(), AUTHORITY_PUB.upper())
+        assert c.get_config()["cadastral_authority"] == AUTHORITY_PUB
+        assert c.get_config()["attestation_schema"] == "AETHERCLAIM-ATTESTATION-V1"
+
+    def test_in_contract_ed25519_matches_rfc8032_and_cryptography(self, env):
+        mod = _contract_module()
+        vectors = [
+            ("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a", "",
+             "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b"),
+            ("3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c", "72",
+             "92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00"),
+        ]
+        for pub, msg, sig in vectors:
+            pub, msg, sig = bytes.fromhex(pub), bytes.fromhex(msg), bytes.fromhex(sig)
+            assert mod._ed25519_verify(pub, msg, sig) is True
+            assert mod._ed25519_verify(pub, msg + b"\x00", sig) is False
+            assert mod._ed25519_verify(pub, msg, sig[:-1] + bytes([sig[-1] ^ 1])) is False
+            assert mod._ed25519_verify(pub[:-1], msg, sig) is False
+            # non-canonical S (S + L) is rejected: signatures are not malleable
+            s_plus_l = (int.from_bytes(sig[32:], "little") + mod._ED_Q).to_bytes(32, "little")
+            assert mod._ed25519_verify(pub, msg, sig[:32] + s_plus_l) is False
+        # Cross-check against an independent implementation when it is installed.
+        ed = pytest.importorskip("cryptography.hazmat.primitives.asymmetric.ed25519")
+        from cryptography.hazmat.primitives import serialization
+
+        for i in range(4):
+            seed = hashlib.sha256(b"seed%d" % i).digest()
+            key = ed.Ed25519PrivateKey.from_private_bytes(seed)
+            pub = key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+            msg = b"AETHERCLAIM-ATTESTATION-V1|rec|plot|%d" % i
+            assert mod._ed25519_verify(pub, msg, key.sign(msg)) is True
+            assert authority.sign(seed, msg) == key.sign(msg)
 
 
 class TestFrontendMirrorParity:
@@ -1445,6 +1608,6 @@ class TestViewReturnsAreCalldataEncodable:
         warp_to(env.vm, datetime.fromtimestamp(claim["evaluated_at"] + 2 * 3600, tz=timezone.utc))
         uniform(env.vm, TIER3)
         self._check(revised(pid), "re_evaluate_revised_claim")
-        self._check(c.verify_plot_provenance("CV-ALMOND-01"), "verify_plot_provenance")
+        self._check(verify_plot(c, "CV-ALMOND-01"), "verify_plot_provenance")
         assert c.get_plot("CV-ALMOND-01")["latitude"] == "36.6000"
         assert c.get_plot("AND-OLIVE-01")["longitude"] == "-4.3700"

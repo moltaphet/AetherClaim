@@ -8,6 +8,10 @@
       [
         "genesis_policyholder",
         "string"
+      ],
+      [
+        "cadastral_authority",
+        "string"
       ]
     ],
     "kwparams": {}
@@ -283,6 +287,14 @@
       "params": [
         [
           "plot_id",
+          "string"
+        ],
+        [
+          "registry_record_id",
+          "string"
+        ],
+        [
+          "attestation_signature",
           "string"
         ]
       ],

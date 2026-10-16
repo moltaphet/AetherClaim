@@ -102,7 +102,7 @@ export function buyBlockers(
 export const BLOCKER_TEXT: Record<Blocker, string> = {
   PLOT_NOT_ACTIVE: "This plot is staged and not yet active.",
   ERR_PROVENANCE_UNVERIFIED:
-    "Plot provenance is not verified. Validators have not matched this plot to the cadastral manifest, so it cannot be insured.",
+    "Plot provenance is not verified. No cadastral-authority attestation has been verified on-chain for this plot, so it cannot be insured.",
   ERR_INELIGIBLE_POLICYHOLDER:
     "This wallet is not the registered operator of this plot. Only the farm operator named in the cadastral manifest can insure it.",
   ERR_DUPLICATE_PLOT_COVERAGE:

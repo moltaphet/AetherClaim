@@ -175,7 +175,7 @@ function Provenance({ plot, live, account, nowSec }: { plot: Plot; live: boolean
     <div className="space-y-3 rounded-lg border border-line p-3">
       <div className="label">Underwriting status</div>
       <div className="flex flex-wrap gap-2">
-        {tag(verified, "PROVENANCE VERIFIED", "PROVENANCE UNVERIFIED · not insurable", "provenance · syncing")}
+        {tag(verified, "CADASTRAL ATTESTATION VERIFIED", "NO VALID CADASTRAL ATTESTATION · not insurable", "attestation · syncing")}
         {tag(
           elig === "unknown" ? null : elig === "eligible",
           "ELIGIBLE · you are the operator",
@@ -190,6 +190,14 @@ function Provenance({ plot, live, account, nowSec }: { plot: Plot; live: boolean
         <Field k="Unresolved on plot" v={plot.active_coverage !== undefined ? `${fromAtto(plot.active_coverage, 3)} GEN` : "—"} mono />
         <Field k="Gauge station (NOAA)" v={plot.ghcnd_station ?? "—"} mono />
       </dl>
+      {plot.registry_record_id && (
+        <div>
+          <div className="label">Cadastral authority record · Ed25519 signature checked on-chain</div>
+          <code className="mt-1 block break-all rounded bg-loam p-2 font-mono text-[10px] text-mist">
+            {plot.registry_record_id} · {plot.attestation_signature?.slice(0, 32)}…
+          </code>
+        </div>
+      )}
       {plot.provenance_manifest_sha256 && (
         <div>
           <div className="label">Manifest digest validators read</div>

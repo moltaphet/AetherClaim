@@ -9,15 +9,18 @@ observed rainfall.
 |---|---|
 | Network | GenLayer Studio Next, chain `61997` |
 | RPC | `https://studio-next.genlayer.com/api` (fallback `studio-dev.genlayer.com/api`) |
-| **Contract (canonical)** | **`0xA4c1eCC531d13486487827D40437FBF1E3CB8F2b`** |
-| Explorer | https://explorer-studio-next.genlayer.com/address/0xA4c1eCC531d13486487827D40437FBF1E3CB8F2b |
-| Source SHA-256 | `d56edd562a293f2f03f306d2ab2b676ffc79c933a8f4a4255e32eb6b0c56ca7f` (`contracts/aether_claim.py`) |
+| **Contract (canonical)** | **`0x2D22196a3cA2278966265806e036580BDe428F23`** |
+| Explorer | https://explorer-studio-next.genlayer.com/address/0x2D22196a3cA2278966265806e036580BDe428F23 |
+| Source SHA-256 | `4f76eba4511bf661356a541770cdc82c08d53eb19de98ec8be764c5b805f6a28` (`contracts/aether_claim.py`) |
 | Exact deployed source | https://github.com/moltaphet/AetherClaim/blob/6d742cfbf3f6485ff3ee63c1fb69a85488d95213/contracts/aether_claim.py (SHA-256 above) |
-| Deploy transaction | `0x822550426ce5de576896b116fc2f01a2e11060c4eb65c56ea9b26d47380fe77f` |
+| Deploy transaction | `0xad3bc528df5e62520a0e2ef99cb22c8cde0ae1483b45c7965c59efdeaf17e1a3` |
 | Plot provenance transactions | see `deployments/studio-next.json` → `provenanceTxs` |
-| Liquidity seed transaction (0.5 GEN) | `0x61795a2afde8b130569d36318342497670192adf4432ff9d2016d8f12737f93d` |
-| Live policy transaction (`create_policy`) | `0xc40ccc69f140e90e65aaeb0764bad7fe324cbef2c1c9a130d1b87abfed0954d0` |
-| Cadastral manifest (pinned) | `registry/cadastral_manifest.json` @ commit `3b39beb` |
+| **Cadastral authority public key** (immutable, set at deploy) | `961559db8703df4434ca9346c6c4108baaaf475127b8614327ddf115762449b4` (Ed25519; readable via `get_config().cadastral_authority`) |
+| **Live rejection of a mismatched plot** | `0x4a8d67f1e49b577e7ced0429b70ffa72a000f9dd2d4fc35c7731dd981becb53e` (`FINISHED_WITH_ERROR`: `ERR_INVALID_CADASTRAL_ATTESTATION`) |
+| Signed attestations | `registry/attestations.json` (SHA-256 `0b217ba3be37219d19b1e3aad634b08f0915a70c3bbfeacac9e260c5d3b1bf97`) |
+| Liquidity seed transaction (0.5 GEN) | `0x51c0705f7878825f57fb96a401e647431ce7040d14b112bd4e2f202b4a55179e` |
+| Live policy transaction (`create_policy`) | `0x2d946e2535824241f850a8f7e80ddd8f6b190c0f439813d9f4e3128264a3b1e2` |
+| Cadastral manifest (pinned, cross-check only) | `registry/cadastral_manifest.json` @ commit `3b39beb` |
 
 This is the only active deployment. Earlier iterations of this contract were
 deployed to other Studio Next addresses during development. They are
@@ -27,18 +30,25 @@ used. `deployments/studio-next.json` always holds the canonical record.
 > **Deployment status.** This is the steward-round build, deployed to Studio Next
 > and exercised live (`deployments/studio-next.json`):
 >
-> - **Plot provenance verified on-chain.** `verify_plot_provenance` was executed
->   for all three genesis plots (`0x972332bc3f…`, `0x95b2922f8f…`,
->   `0xd40e9fb224…`). A `list_plots` readback shows
->   `provenance_verified: true` for each, with `provenance_manifest_sha256`
->   `08adb6e9…` equal to the SHA-256 of `registry/cadastral_manifest.json`.
+> - **Plot provenance verified on-chain, against an independent signature.**
+>   `verify_plot_provenance(plot_id, registry_record_id, attestation_signature)`
+>   was executed for all three genesis plots (`0x40be1a0f2b…`,
+>   `0x7f61f1ff23…`, `0x0d509f038c…`).
+>   The contract verified the cadastral authority's Ed25519 signature inside
+>   GenVM, then validators matched the pinned manifest. A `list_plots` readback
+>   shows `provenance_verified: true`, the authority's `registry_record_id` and
+>   the signature for each plot.
+> - **Live adversarial check.** Before verifying anything, the deploy script
+>   submitted the authority's genuine signature for `CV-ALMOND-01` against
+>   `AND-OLIVE-01`. It was rejected on-chain (`0x4a8d67f1e4…`) with
+>   `[EXPECTED] ERR_INVALID_CADASTRAL_ATTESTATION: the cadastral authority did not sign this plot`.
 > - **Liquidity.** 0.5 GEN seeded: `pool_balance` 0.5 GEN, `total_lp_shares` 0.5e18.
-> - **Live policy.** `P-1`, 0.1 GEN coverage on `AND-OLIVE-01`, signed by the
+> - **Live policy.** `P-1`, 0.1 GEN coverage on `AND-OLIVE-01` (only possible after attestation), signed by the
 >   registered operator (`0xbE43…2B36`), premium 0.008 GEN. Readback:
 >   `status: ACTIVE`, plot `coverage_locked: true`, pool `total_liabilities` 0.1 GEN.
 > - **Not exercised live:** `evaluate_claim`, `resolve_boundary_dispute`,
 >   `re_evaluate_revised_claim` and payout release. A policy only matures 100 days
->   after purchase (`matures_at` 1800662400), so these are covered by the direct-mode
+>   after purchase (`matures_at` 1800748800), so these are covered by the direct-mode
 >   suite only. The live validator network has **not** been observed settling a claim.
 >
 > **Correction to an earlier claim.** Earlier versions of this README blamed
@@ -57,7 +67,8 @@ answered below, with the test that proves it and what is **not** solved.
 
 | Steward requirement | What changed | Test / evidence | Honest limit |
 |---|---|---|---|
-| Independently verifiable plot provenance | `verify_plot_provenance(plot_id)`: validators fetch a manifest pinned to a **git commit** and match coordinates, 12 baselines, crop cycle, `max_plot_coverage`, GHCN station and eligible operator, and the stored `cadastral_hash` must be the SHA-256 of that record. Staging refuses a hash that does not commit to the record. A plot is not insurable until verified (`ERR_PROVENANCE_UNVERIFIED`) | `test_unverified_plot_provenance_cannot_be_insured` (9 field-level mismatches, outage, bad schema, forged validator payload), `test_cadastral_hash_must_commit_to_the_staged_record`, `test_genesis_plots_verify_against_independent_manifest`, `test_committed_manifest_file_verifies_every_genesis_plot` | The manifest is a file in this project's own GitHub repository. Pinning it to a commit makes it immutable and independently re-checkable, but it is **not a government land registry**, and the admin who wrote the plots also wrote the manifest. See "Provenance trust model" below |
+| **Plot provenance independent of the project** (final steward item: *"the plot manifest is controlled by the project itself"*) | `verify_plot_provenance(plot_id, registry_record_id, attestation_signature)` now requires an **Ed25519 attestation from a cadastral authority** whose public key is fixed in the constructor (`get_config().cadastral_authority`, no setter). The signature covers `AETHERCLAIM-ATTESTATION-V1 \| record_id \| plot_id \| cadastral_hash \| eligible_policyholder`; the hash in turn commits to coordinates, 12 baselines, crop cycle, coverage cap and GHCN station. The contract checks the signature itself, before fetching anything. A fabricated, altered or mismatched plot reverts with **`ERR_INVALID_CADASTRAL_ATTESTATION`** and writes nothing. The pinned manifest is kept only as a second cross-check | **`test_fabricated_or_mismatched_plot_attestation_is_strictly_rejected`** (fabricated plot the manifest *does* list, 8 malformed/forged signatures x 3 callers, replayed genuine signatures, altered operator, altered coverage cap, then a positive control), `test_committed_manifest_and_attestations_verify_every_genesis_plot`, `test_in_contract_ed25519_matches_rfc8032_and_cryptography`, `test_deployment_rejects_an_invalid_authority_key`. Live: see the rejected-transaction row above | The authority key on the live deployment belongs to a **stand-in** authority that this project generated (`registry/attest.py`), because no government registry signs for a hackathon. The mechanism is real and enforced on-chain, the trust anchor is not yet a real registry. See "Provenance trust model" |
+| Independently verifiable plot provenance (previous round) | `verify_plot_provenance(plot_id)`: validators fetch a manifest pinned to a **git commit** and match coordinates, 12 baselines, crop cycle, `max_plot_coverage`, GHCN station and eligible operator, and the stored `cadastral_hash` must be the SHA-256 of that record. Staging refuses a hash that does not commit to the record. A plot is not insurable until verified (`ERR_PROVENANCE_UNVERIFIED`) | `test_unverified_plot_provenance_cannot_be_insured` (9 field-level mismatches, outage, bad schema, forged validator payload), `test_cadastral_hash_must_commit_to_the_staged_record`, `test_genesis_plots_verify_against_independent_manifest` | The manifest is a file in this project's own GitHub repository. Pinning it to a commit makes it immutable and independently re-checkable, but it is **not a government land registry**, and the admin who wrote the plots also wrote the manifest. See "Provenance trust model" below |
 | Policyholder eligibility | Each plot binds one `eligible_policyholder`, carried in the manifest. `create_policy` reverts with `ERR_INELIGIBLE_POLICYHOLDER` for anyone else | `test_ineligible_policyholder_rejected_on_create_policy` | One operator per plot, set at staging. There is no on-chain operator change |
 | No duplicate coverage on a plot | One live coverage window per plot, and unresolved coverage on a plot may not exceed `max_plot_coverage`. Both revert with `ERR_DUPLICATE_PLOT_COVERAGE`. Settlement and expiry release the plot's coverage | `test_duplicate_overlapping_coverage_on_same_plot_rejected`, `test_expiry_releases_plot_coverage` | The lock is per `plot_id`. Two registry entries for the same physical parcel are prevented only by the manifest review, not by geometry |
 | Correlated weather sources | Three sources on **three hostnames and three operator domains**: Open-Meteo ERA5 (`archive-api.open-meteo.com`), NASA POWER (`power.larc.nasa.gov`), NOAA NCEI GHCN-Daily rain gauge (`www.ncei.noaa.gov`). The contract refuses to run a plan that repeats a hostname **or** an operator domain | `test_three_weather_sources_enforce_distinct_hostnames`, `test_contract_refuses_a_correlated_source_plan`, `test_station_gauge_is_a_real_third_vote` | ERA5 and NASA POWER both assimilate satellite and station data: independent infrastructure, not independent physics. The gauge can be tens of km from the plot (see §5) |
@@ -69,7 +80,8 @@ answered below, with the test that proves it and what is **not** solved.
 
 ```
             ┌────────────────────── AetherClaim contract ──────────────────────┐
- Anyone ───▶│ verify_plot_provenance   validators ⇄ pinned cadastral manifest │
+ Anyone ───▶│ verify_plot_provenance   Ed25519 authority signature (on-chain) │
+            │                          + validators ⇄ pinned manifest         │
  LP ──GEN──▶│ provide_liquidity        pool_balance / total_liabilities        │
  Operator ─▶│ create_policy(plot,cov)  verified + eligible + no overlap/cap    │
             │   refuses arid + off-season terms   policies{}  epoch_exposure{} │
@@ -83,7 +95,7 @@ answered below, with the test that proves it and what is **not** solved.
  Anyone ───▶│ release_payout   24h cooldown → 3-day linear vesting → holder    │
             └──────────────────────────────────────────────────────────────────┘
    Open-Meteo ERA5 ── NASA POWER ── NOAA NCEI GHCN-Daily gauge  (3 operators)
-   manifest: raw.githubusercontent.com @ pinned commit
+   cadastral authority key (constructor, immutable) · manifest: raw.githubusercontent.com @ pinned commit
 ```
 
 | Deficit vs. baseline | Tier | Payout |
@@ -365,6 +377,7 @@ is about how the realised payout tracks the risk the premium priced:
 | 22 (steward) | Two of three sources were two hostnames of one operator | NOAA NCEI GHCN-Daily gauge replaces the GFS leg. `_sources_independent` demands distinct hostnames and operator domains, at deploy and at every evaluation. Regression: `test_three_weather_sources_enforce_distinct_hostnames`, `test_contract_refuses_a_correlated_source_plan` |
 | 23 (steward) | Validators straddling a tier threshold could rotate leaders until the claim expired unpaid | Monotone acceptance (leader at or below the validator's tier) plus the policyholder backstop `resolve_boundary_dispute`. Regression: `test_validators_straddling_tier_boundary_converge_without_liveness_deadlock`, `test_boundary_dispute_resolves_at_guaranteed_lower_bound` |
 | 24 (steward) | Upstream observations revised after settlement had no remedy | 10-day maturity lag, and `re_evaluate_revised_claim` inside the 24h cooldown with the unpaid coverage held in reserve until `finalize_claim`. Regression: `test_revised_observations_during_cooldown_fairly_update_settlement_tier` and four more (see §0) |
+| 25 (steward, final) | The plot manifest is controlled by the project, so pinning it proves the records have not changed but not that the plots are legitimate | `verify_plot_provenance` requires an Ed25519 attestation from a cadastral-authority key fixed at deployment, verified inside the contract. Fabricated, altered or mismatched plots revert with `ERR_INVALID_CADASTRAL_ATTESTATION`. Live rejection recorded in `deployments/studio-next.json` → `rejectedAttestationTx`. Regression: `test_fabricated_or_mismatched_plot_attestation_is_strictly_rejected`. **Limit:** the live authority key is a project-generated stand-in |
 
 **Deliberate deviation from the plain ERC-4626 formula.** A withdrawal pays
 `min(shares × pool / total_shares, shares × (pool − reserved) / total_shares)`.
@@ -375,7 +388,7 @@ the leaver and the stayer end with identical value.
 
 ## 3. Verification & Testing
 
-### 3a. Reproducing the 89 direct-mode contract tests
+### 3a. Reproducing the 96 direct-mode contract tests
 
 The suite runs the contract in the **direct VM execution mode** of
 `genlayer-test` (gltest). The contract's Python executes in-process under the
@@ -390,7 +403,7 @@ exercise a live validator network, real source data or the wallet.
 | Requirement | Value |
 |---|---|
 | Python | 3.12 (verified with 3.12.12) |
-| Test framework | `genlayer-test==0.30.0rc2` (pulls `genlayer-py` 0.19.0rc2 and `pytest`) |
+| Test framework | `genlayer-test==0.30.0rc2` (pulls `genlayer-py` 0.19.0rc2 and `pytest`) plus `cryptography`, which cross-checks the in-contract Ed25519 verifier. Without it that one cross-check is skipped, not failed |
 | GenVM runner | `GENVM_VERSION=v0.6.0-rc5`, set by default in `tests/conftest.py` |
 | Network | needed once, to download the runner bundle from GitHub releases |
 | Disk | the runner is cached under `~/.cache/gltest-direct` |
@@ -401,7 +414,7 @@ runner is not found, so the pin matters.
 
 **Commands** (the previous 67-test suite was verified from an empty cache and a
 fresh virtualenv in 2m26s, almost all of it the one-time runner download. This
-89-test suite was run on a warm cache, about 9 s.)
+96-test suite was run on a warm cache, about 23 s.)
 
 ```bash
 # 1. virtualenv on Python 3.12
@@ -446,6 +459,10 @@ UPDATE_PARITY=1 python -m pytest tests/test_aether_claim.py -k Parity
 
 # the manifest is generated and can be checked without a network
 python3 registry/build_manifest.py --check
+
+# the authority's signatures: verify attestations.json against the manifest (pure Python;
+# also cross-checks with `cryptography` when installed)
+python3 registry/attest.py check
 ```
 
 **Reproducing the live run** (what produced `deployments/studio-next.json`):
@@ -454,7 +471,9 @@ python3 registry/build_manifest.py --check
 genlayer network set studio-next
 genlayer account use aetherclaim-admin          # admin / deployer
 genlayer deploy                                  # runs deploy/deploy_aether_claim.ts:
-                                                 #   deploy, verify_plot_provenance x3,
+                                                 #   deploy (with the authority key), one live
+                                                 #   mismatched-attestation rejection,
+                                                 #   verify_plot_provenance x3,
                                                  #   provide_liquidity 0.5 GEN, readbacks
 
 # the policy must be signed by the ELIGIBLE operator, not the admin.
@@ -463,9 +482,9 @@ mkdir -p /tmp/run/deploy && cp scripts/create_sample_policy.ts /tmp/run/deploy/
 genlayer account use aetherclaim-farmer
 (cd /tmp/run && PROJECT_ROOT=$OLDPWD genlayer deploy)    # create_policy 0.1 GEN on AND-OLIVE-01
 
-genlayer call 0xA4c1eCC531d13486487827D40437FBF1E3CB8F2b list_plots
-genlayer call 0xA4c1eCC531d13486487827D40437FBF1E3CB8F2b get_pool
-genlayer call 0xA4c1eCC531d13486487827D40437FBF1E3CB8F2b get_policy --args P-1
+genlayer call 0x2D22196a3cA2278966265806e036580BDe428F23 list_plots
+genlayer call 0x2D22196a3cA2278966265806e036580BDe428F23 get_pool
+genlayer call 0x2D22196a3cA2278966265806e036580BDe428F23 get_policy --args P-1
 ```
 
 ## 4. Insurable calendar: Central Valley (Almond / winter crop)
@@ -529,30 +548,69 @@ per plot, and ECMWF's validated (non-preliminary) ERA5 product.
 
 ### Provenance trust model
 
-`verify_plot_provenance` makes the registry **independently checkable**, not
-**authoritative**.
+A plot is insurable only if **both** checks pass, in this order:
 
-- What it does prove: the on-chain plot matches, byte for byte in every
-  settlement-relevant field, a manifest that is immutable (pinned to commit
-  `3b39beb`), publicly fetchable by anyone, and whose cadastral hash is a
-  recomputable SHA-256. Validators, not the admin, perform the check, and any
-  address can trigger it.
-- What it does not prove: that the coordinates, baselines or operator are true.
-  The manifest is authored by the project. A real deployment needs the manifest
-  to be issued by a land registry or a licensed agronomist, signed, and the
-  operator binding to come from that authority. The contract is built so that
-  swapping `REGISTRY_MANIFEST_URL` for such a source needs no other change.
-- The admin cannot make a plot insurable by typing alone, and cannot alter a
-  verified plot, because no function mutates a verified record.
+1. **Cadastral-authority attestation (on-chain, deterministic).** The contract
+   verifies an Ed25519 signature, from the public key given to the constructor,
+   over `AETHERCLAIM-ATTESTATION-V1 | registry_record_id | plot_id | cadastral_hash | eligible_policyholder`.
+   Verification runs inside the contract (RFC 8032, pure Python, canonical-`S`
+   only), so it needs no network and no trust in the caller. The admin never holds
+   the private key and no function changes the public key. Because `cadastral_hash`
+   is a SHA-256 commitment to the coordinates, the 12 baselines, the crop cycle,
+   the coverage cap and the GHCN station, one signature binds all of them to the
+   named operator.
+   - *Fabricated plot:* no signature exists, `ERR_INVALID_CADASTRAL_ATTESTATION`.
+   - *Mismatched plot:* a genuine signature for plot A does not verify plot B, or
+     plot A under another record id.
+   - *Altered plot:* changing the operator, the coverage cap or any committed
+     field changes the signed bytes, so the signature no longer verifies.
+2. **Manifest cross-check (validators).** Validators fetch the manifest pinned to
+   commit `3b39beb` and match it field by field. This is no longer the trust
+   anchor: it only catches an inconsistency between the attested record and the
+   published file.
+
+Worked example, all on the live contract: `AND-OLIVE-01` (Andalusia Olive Groves,
+record `DCA-PARCEL-000003`, operator `0xbE43…2B36`) was verified only after the
+authority's signature checked out. The authority's signature for `CV-ALMOND-01`,
+submitted for `AND-OLIVE-01`, was rejected on-chain with
+`ERR_INVALID_CADASTRAL_ATTESTATION` (the rejected transaction is in the table at
+the top). The operator bound by the attestation is the only address that can buy
+cover on the plot (`ERR_INELIGIBLE_POLICYHOLDER` for anyone else).
+
+**What this does not prove, stated plainly.**
+
+- **The authority key on the live deployment is a stand-in, not a government
+  registry.** No land registry or cadastre has signed anything for AetherClaim. The
+  key was generated by this project with `registry/attest.py keygen`, stored outside
+  the repository (`~/.aetherclaim/cadastral_authority.seed`, mode 600) and used to
+  sign `registry/attestations.json`. The contract separates the roles correctly
+  (the deploying admin cannot attest and cannot change the key), but the same
+  people ran both roles in this demo, so for **this deployment** the attestation
+  shows the mechanism, not independent ground truth.
+- **What a real deployment changes.** Pass a real registry's, licensed
+  surveyor's or oracle network's Ed25519 public key as `cadastral_authority`, and
+  have *them* sign the message above. No contract change is needed. Their
+  signature would then be the first evidence in this system that does not come
+  from the project.
+- **A signature proves the authority said it, not that it is true.** If the
+  authority attests a wrong coordinate or the wrong operator, the contract
+  accepts it. A compromised or coerced authority key is a single point of failure
+  and cannot be rotated without redeploying. Multi-signer quorum attestation is
+  not implemented.
+- **No revocation.** A verified plot stays verified. No function mutates a
+  verified record, so an authority that later disowns a plot cannot un-insure it
+  (the admin can still `deactivate_plot`).
+- **The attestation is not time-boxed** and does not name the contract, so the
+  same signature is valid on any deployment that trusts the same key.
 
 ## 6. Layout
 
 ```
 contracts/aether_claim.py      Intelligent contract
-registry/                      cadastral manifest + generator (the provenance source)
+registry/                      cadastral manifest + generator, authority signer/verifier (attest.py), signed attestations.json
 tests/                         pytest direct-mode suite (+ validator harness)
 scripts/create_sample_policy.ts live create_policy from the eligible operator
-deploy/deploy_aether_claim.ts  deploy + provenance verification + liquidity seed + readbacks + ABI export
+deploy/deploy_aether_claim.ts  deploy + live attestation rejection + provenance verification + liquidity seed + readbacks + ABI export
 deployments/                   ABI schema + deployment record (tx hashes, readbacks)
 frontend/                      Next.js 14 + Tailwind dapp (+ tests/ helper + parity tests)
 ```

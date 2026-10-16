@@ -4,7 +4,7 @@
 export const CHAIN_ID = 61997;
 export const CHAIN_ID_HEX = "0xf22d";
 export const CONTRACT_ADDRESS =
-  process.env.NEXT_PUBLIC_AETHER_CLAIM_ADDRESS ?? "0xA4c1eCC531d13486487827D40437FBF1E3CB8F2b";
+  process.env.NEXT_PUBLIC_AETHER_CLAIM_ADDRESS ?? "0x2D22196a3cA2278966265806e036580BDe428F23";
 
 // Primary first, fallback second. Both serve chain 61997.
 export const RPC_URLS = [
@@ -417,6 +417,8 @@ export interface Plot {
   provenance_verified?: boolean;
   provenance_verified_at?: number;
   provenance_manifest_sha256?: string;
+  registry_record_id?: string; // the cadastral authority's id for the parcel
+  attestation_signature?: string; // Ed25519 signature the authority issued for this plot
   active_coverage?: string;
   last_coverage_end?: number;
   coverage_locked?: boolean;

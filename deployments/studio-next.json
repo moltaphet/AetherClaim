@@ -2,26 +2,36 @@
   "network": "GenLayer Studio Next",
   "chainId": 61997,
   "rpc": "https://studio-next.genlayer.com/api",
-  "address": "0xA4c1eCC531d13486487827D40437FBF1E3CB8F2b",
-  "deployTx": "0x822550426ce5de576896b116fc2f01a2e11060c4eb65c56ea9b26d47380fe77f",
+  "address": "0x2D22196a3cA2278966265806e036580BDe428F23",
+  "deployTx": "0xad3bc528df5e62520a0e2ef99cb22c8cde0ae1483b45c7965c59efdeaf17e1a3",
   "deployExecutionVerified": true,
-  "deployedAt": "2026-10-15T11:35:29.842Z",
+  "deployedAt": "2026-10-16T13:50:14.672Z",
   "sourcePath": "contracts/aether_claim.py",
-  "sourceSha256": "d56edd562a293f2f03f306d2ab2b676ffc79c933a8f4a4255e32eb6b0c56ca7f",
+  "sourceSha256": "4f76eba4511bf661356a541770cdc82c08d53eb19de98ec8be764c5b805f6a28",
   "manifestSha256": "08adb6e91001df820a06561dcf6b1d66a6c7910f66c6ac715b658a3f05415f41",
   "genesisPolicyholder": "0xbe43375329eb4a3cafc344f0e61859905aba2b36",
-  "provenanceTxs": {
-    "CV-ALMOND-01": "0x972332bc3f4a8aa7f5d82bfda6227fd8af41b5504c9b5ccddb57a1f2be0e88a6",
-    "IA-CORN-01": "0x95b2922f8f94dd07b0ec0ceccc2999d431f6b41a41c4285f4940ebbf607188fb",
-    "AND-OLIVE-01": "0xd40e9fb224bc96222e66bee223374056f893eabc75df9c64226e12df8f81c27b"
+  "cadastralAuthority": "961559db8703df4434ca9346c6c4108baaaf475127b8614327ddf115762449b4",
+  "attestationsSha256": "0b217ba3be37219d19b1e3aad634b08f0915a70c3bbfeacac9e260c5d3b1bf97",
+  "rejectedAttestationTx": {
+    "plot": "AND-OLIVE-01",
+    "signatureOf": "CV-ALMOND-01",
+    "tx": "0x4a8d67f1e49b577e7ced0429b70ffa72a000f9dd2d4fc35c7731dd981becb53e",
+    "outcome": "failed",
+    "expected": "failed"
   },
-  "seedLiquidityTx": "0x61795a2afde8b130569d36318342497670192adf4432ff9d2016d8f12737f93d",
+  "provenanceTxs": {
+    "CV-ALMOND-01": "0x40be1a0f2bb250b7bb9ca42ae901816cdc21323007541f11fdf2a503994a38de",
+    "IA-CORN-01": "0x7f61f1ff236467facb81a44edc79215fc4bb69d278706c85307e27535ec61673",
+    "AND-OLIVE-01": "0x0d509f038c8ad55cf39ed2f560102a37d0839b5ac447e3ad71e93f59f412c4c9"
+  },
+  "seedLiquidityTx": "0x51c0705f7878825f57fb96a401e647431ce7040d14b112bd4e2f202b4a55179e",
   "seedExecutionVerified": true,
   "readbacks": {
     "list_plots": [
       {
         "active": true,
         "active_coverage": "0",
+        "attestation_signature": "4ac565f221dad07da77da54f961a2b80a200eca49b1b70c219d12bb95766a5668d2345ffedbc05f7be6a8bffddba7b91d351b5db00068b1382bad9de9cbfe70b",
         "cadastral_hash": "eb190f10ac1e3fc5d10eb6f73859c0f3e6ce9cb0a4c0f32c51c39b588599946e",
         "coverage_locked": false,
         "crop_cycle": "Nov-Mar",
@@ -54,13 +64,15 @@
         "plot_id": "CV-ALMOND-01",
         "provenance_manifest_sha256": "08adb6e91001df820a06561dcf6b1d66a6c7910f66c6ac715b658a3f05415f41",
         "provenance_verified": true,
-        "provenance_verified_at": 1792064132,
-        "registered_at": 1792064121,
-        "staged_at": 1792064121
+        "provenance_verified_at": 1792158637,
+        "registered_at": 1792158605,
+        "registry_record_id": "DCA-PARCEL-000001",
+        "staged_at": 1792158605
       },
       {
         "active": true,
         "active_coverage": "0",
+        "attestation_signature": "fb684f1d939befc9b12665bf76b8316e42988d452df14ce4b3e096010faab351784e175f4e6d2bfc56d27cbbf8778102a59bf9ea6b6eed5b8b4ff7483d403a09",
         "cadastral_hash": "d4f49093f402d3c39709a761f3d45d00b6f2f1c313c123b32212d07c1dc19599",
         "coverage_locked": false,
         "crop_cycle": "Apr-Oct",
@@ -93,13 +105,15 @@
         "plot_id": "IA-CORN-01",
         "provenance_manifest_sha256": "08adb6e91001df820a06561dcf6b1d66a6c7910f66c6ac715b658a3f05415f41",
         "provenance_verified": true,
-        "provenance_verified_at": 1792064141,
-        "registered_at": 1792064121,
-        "staged_at": 1792064121
+        "provenance_verified_at": 1792158654,
+        "registered_at": 1792158605,
+        "registry_record_id": "DCA-PARCEL-000002",
+        "staged_at": 1792158605
       },
       {
         "active": true,
         "active_coverage": "0",
+        "attestation_signature": "03150a988ada7540c975871c75e6d2d2e302f487bfa631f61be288e803378c0fe167ff557ebe2b34bfa5926ab1ba1b4613aa55f7241cf67f16c07468c5129701",
         "cadastral_hash": "b89ac8d42c4cde8bd29c6a451b3c75f3710b0e412eccd19fe01aa9ecabe18e34",
         "coverage_locked": false,
         "crop_cycle": "Oct-Mar",
@@ -132,9 +146,10 @@
         "plot_id": "AND-OLIVE-01",
         "provenance_manifest_sha256": "08adb6e91001df820a06561dcf6b1d66a6c7910f66c6ac715b658a3f05415f41",
         "provenance_verified": true,
-        "provenance_verified_at": 1792064151,
-        "registered_at": 1792064121,
-        "staged_at": 1792064121
+        "provenance_verified_at": 1792158664,
+        "registered_at": 1792158605,
+        "registry_record_id": "DCA-PARCEL-000003",
+        "staged_at": 1792158605
       }
     ],
     "get_pool": {
@@ -172,6 +187,8 @@
     "get_config": {
       "admin": "0x7C1716240c83df4A62447e5fAb6CDA39C3A3Ea48",
       "aggregation": "median of 3 answering sources; lower of 2",
+      "attestation_schema": "AETHERCLAIM-ATTESTATION-V1",
+      "cadastral_authority": "961559db8703df4434ca9346c6c4108baaaf475127b8614327ddf115762449b4",
       "cadastre_schema": "AETHERCLAIM-CADASTRE-V1",
       "cooldown_seconds": 86400,
       "deficit_noise_tolerance": 5,
@@ -203,8 +220,8 @@
       "windows_required": 2
     }
   },
-  "readbacksAt": "2026-10-15T11:37:21.770Z",
-  "samplePolicyTx": "0xc40ccc69f140e90e65aaeb0764bad7fe324cbef2c1c9a130d1b87abfed0954d0",
+  "readbacksAt": "2026-10-16T13:51:27.745Z",
+  "samplePolicyTx": "0x2d946e2535824241f850a8f7e80ddd8f6b190c0f439813d9f4e3128264a3b1e2",
   "samplePolicy": {
     "plot": "AND-OLIVE-01",
     "coverage": "100000000000000000",
@@ -216,39 +233,40 @@
       {
         "claimed": false,
         "coverage_amount": "100000000000000000",
-        "end_epoch": 2975,
-        "end_ts": 1799840284,
-        "matures_at": 1800662400,
-        "observation_end": 1799712000,
-        "observation_start": 1797379200,
+        "end_epoch": 2976,
+        "end_ts": 1799934729,
+        "matures_at": 1800748800,
+        "observation_end": 1799798400,
+        "observation_start": 1797465600,
         "plot_id": "AND-OLIVE-01",
         "policy_id": "P-1",
         "policyholder": "0xbE43375329eb4A3CAFc344F0E61859905ABa2B36",
         "premium_paid": "8000000000000000",
         "start_epoch": 2963,
-        "start_ts": 1792064284,
+        "start_ts": 1792158729,
         "status": "ACTIVE"
       }
     ],
     "get_policy": {
       "claimed": false,
       "coverage_amount": "100000000000000000",
-      "end_epoch": 2975,
-      "end_ts": 1799840284,
-      "matures_at": 1800662400,
-      "observation_end": 1799712000,
-      "observation_start": 1797379200,
+      "end_epoch": 2976,
+      "end_ts": 1799934729,
+      "matures_at": 1800748800,
+      "observation_end": 1799798400,
+      "observation_start": 1797465600,
       "plot_id": "AND-OLIVE-01",
       "policy_id": "P-1",
       "policyholder": "0xbE43375329eb4A3CAFc344F0E61859905ABa2B36",
       "premium_paid": "8000000000000000",
       "start_epoch": 2963,
-      "start_ts": 1792064284,
+      "start_ts": 1792158729,
       "status": "ACTIVE"
     },
     "get_plot": {
       "active": true,
       "active_coverage": "100000000000000000",
+      "attestation_signature": "03150a988ada7540c975871c75e6d2d2e302f487bfa631f61be288e803378c0fe167ff557ebe2b34bfa5926ab1ba1b4613aa55f7241cf67f16c07468c5129701",
       "cadastral_hash": "b89ac8d42c4cde8bd29c6a451b3c75f3710b0e412eccd19fe01aa9ecabe18e34",
       "coverage_locked": true,
       "crop_cycle": "Oct-Mar",
@@ -257,7 +275,7 @@
       "crop_type": "OLIVE",
       "eligible_policyholder": "0xbE43375329eb4A3CAFc344F0E61859905ABa2B36",
       "ghcnd_station": "SP000008410",
-      "last_coverage_end": 1799840284,
+      "last_coverage_end": 1799934729,
       "latitude": "37.3800",
       "latitude_e4": 373800,
       "longitude": "-4.3700",
@@ -281,9 +299,10 @@
       "plot_id": "AND-OLIVE-01",
       "provenance_manifest_sha256": "08adb6e91001df820a06561dcf6b1d66a6c7910f66c6ac715b658a3f05415f41",
       "provenance_verified": true,
-      "provenance_verified_at": 1792064151,
-      "registered_at": 1792064121,
-      "staged_at": 1792064121
+      "provenance_verified_at": 1792158664,
+      "registered_at": 1792158605,
+      "registry_record_id": "DCA-PARCEL-000003",
+      "staged_at": 1792158605
     },
     "get_pool": {
       "committed_payouts": "0",
@@ -298,8 +317,13 @@
       "total_lp_shares": "500000000000000000"
     }
   },
-  "samplePolicyAt": "2026-10-15T11:38:14.498Z",
+  "samplePolicyAt": "2026-10-16T13:52:25.274Z",
   "supersededDeployments": [
+    {
+      "address": "0xA4c1eCC531d13486487827D40437FBF1E3CB8F2b",
+      "deployTx": "0x822550426ce5de576896b116fc2f01a2e11060c4eb65c56ea9b26d47380fe77f",
+      "reason": "Previous build: plots were insurable on a manifest in the project's own repository alone. Superseded by the cadastral-authority attestation build above (verify_plot_provenance now needs an Ed25519 signature from an authority key fixed at deployment). Holds a 0.5 GEN seed and a live 0.1 GEN policy P-1 owned by the admin/farmer accounts."
+    },
     {
       "address": "0x7F0f2F18854907e31731F6aee3B4c7e84B1D0f12",
       "deployTx": "0x77eeebf2aaa7d745cda3d2e8516da5b8e98ce55c9b0f8f16cb72f3fcc9308690",

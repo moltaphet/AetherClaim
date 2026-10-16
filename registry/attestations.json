@@ -1,0 +1,24 @@
+{
+  "schema": "AETHERCLAIM-ATTESTATION-V1",
+  "authority_public_key": "961559db8703df4434ca9346c6c4108baaaf475127b8614327ddf115762449b4",
+  "attestations": {
+    "CV-ALMOND-01": {
+      "registry_record_id": "DCA-PARCEL-000001",
+      "cadastral_hash": "eb190f10ac1e3fc5d10eb6f73859c0f3e6ce9cb0a4c0f32c51c39b588599946e",
+      "eligible_policyholder": "0xbe43375329eb4a3cafc344f0e61859905aba2b36",
+      "signature": "4ac565f221dad07da77da54f961a2b80a200eca49b1b70c219d12bb95766a5668d2345ffedbc05f7be6a8bffddba7b91d351b5db00068b1382bad9de9cbfe70b"
+    },
+    "IA-CORN-01": {
+      "registry_record_id": "DCA-PARCEL-000002",
+      "cadastral_hash": "d4f49093f402d3c39709a761f3d45d00b6f2f1c313c123b32212d07c1dc19599",
+      "eligible_policyholder": "0xbe43375329eb4a3cafc344f0e61859905aba2b36",
+      "signature": "fb684f1d939befc9b12665bf76b8316e42988d452df14ce4b3e096010faab351784e175f4e6d2bfc56d27cbbf8778102a59bf9ea6b6eed5b8b4ff7483d403a09"
+    },
+    "AND-OLIVE-01": {
+      "registry_record_id": "DCA-PARCEL-000003",
+      "cadastral_hash": "b89ac8d42c4cde8bd29c6a451b3c75f3710b0e412eccd19fe01aa9ecabe18e34",
+      "eligible_policyholder": "0xbe43375329eb4a3cafc344f0e61859905aba2b36",
+      "signature": "03150a988ada7540c975871c75e6d2d2e302f487bfa631f61be288e803378c0fe167ff557ebe2b34bfa5926ab1ba1b4613aa55f7241cf67f16c07468c5129701"
+    }
+  }
+}

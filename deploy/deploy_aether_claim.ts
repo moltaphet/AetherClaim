@@ -8,6 +8,11 @@
  * `genlayer deploy` runs this file with a client already bound to the selected
  * network and account, so no key or chain object lives here.
  *
+ * Cadastral authority: the Ed25519 public key in registry/attestations.json is
+ * passed to the constructor and is immutable. `verify_plot_provenance` needs the
+ * authority's signature over each plot, so the admin who runs this script cannot
+ * make a plot insurable by itself. The private key never touches this script.
+ *
  * Seed registry: the three genesis plots (Central Valley Almond Basin, Iowa Corn
  * Belt, Andalusia Olive Groves) are written into storage by the constructor
  * (GENESIS_PLOTS), bound to the eligible farm operator named in
@@ -32,6 +37,7 @@ const CONTRACT_PATH = "contracts/aether_claim.py";
 const ABI_PATH = "deployments/aether_claim_abi.json";
 const DEPLOYMENT_PATH = "deployments/studio-next.json";
 const MANIFEST_PATH = "registry/cadastral_manifest.json";
+const ATTESTATIONS_PATH = "registry/attestations.json";
 const RETRIES = 200;
 
 const MAX_EPOCH_EXPOSURE = 5n * 10n ** 18n; // 5 GEN of coverage per epoch
@@ -130,6 +136,14 @@ export default async function main(client: Client): Promise<string> {
     plots: Record<string, { eligible_policyholder: string }>;
   };
   const plotIds = Object.keys(manifest.plots);
+  const attBuf = readFileSync(path.resolve(process.cwd(), ATTESTATIONS_PATH));
+  const att = JSON.parse(attBuf.toString("utf8")) as {
+    authority_public_key: string;
+    attestations: Record<string, { registry_record_id: string; signature: string; cadastral_hash: string }>;
+  };
+  for (const id of plotIds) {
+    if (!att.attestations[id]) throw new Error(`no cadastral attestation for ${id}`);
+  }
   const operators = new Set(plotIds.map((id) => manifest.plots[id].eligible_policyholder.toLowerCase()));
   if (operators.size !== 1) throw new Error("manifest must name exactly one genesis operator");
   const genesisPolicyholder = [...operators][0];
@@ -139,7 +153,7 @@ export default async function main(client: Client): Promise<string> {
   const fees = await client.estimateTransactionFees({});
   console.log(`Estimated fee deposit: ${fees.feeValue} wei`);
 
-  const hash = await client.deployContract({ code, args: [MAX_EPOCH_EXPOSURE, genesisPolicyholder], fees });
+  const hash = await client.deployContract({ code, args: [MAX_EPOCH_EXPOSURE, genesisPolicyholder, att.authority_public_key], fees });
   const receipt = await client.waitForTransactionReceipt({ hash, waitUntil: "decided", retries: RETRIES });
   const deployOutcome = assessReceipt(receipt);
   if (deployOutcome === "failed") throw new Error(`Deployment failed: ${JSON.stringify(receipt, jsonSafe)}`);
@@ -167,6 +181,8 @@ export default async function main(client: Client): Promise<string> {
         sourceSha256,
         manifestSha256: createHash("sha256").update(manifestBuf).digest("hex"),
         genesisPolicyholder,
+        cadastralAuthority: att.authority_public_key,
+        attestationsSha256: createHash("sha256").update(attBuf).digest("hex"),
       },
       jsonSafe,
       2,
@@ -177,12 +193,40 @@ export default async function main(client: Client): Promise<string> {
   const save = (patch: Record<string, unknown>) =>
     writeFileSync(path.resolve(process.cwd(), DEPLOYMENT_PATH), JSON.stringify({ ...record(), ...patch }, jsonSafe, 2));
 
-  // Independent plot provenance: validators fetch the pinned cadastral manifest and
-  // match every field. Permissionless; a mismatch leaves the plot uninsurable.
+  // Adversarial check, live: present the authority's genuine signature for ANOTHER
+  // plot. The contract must revert with ERR_INVALID_CADASTRAL_ATTESTATION.
+  if (plotIds.length >= 2) {
+    const [target, donor] = [plotIds[plotIds.length - 1], plotIds[0]];
+    try {
+      const h = await client.writeContract({
+        address,
+        functionName: "verify_plot_provenance",
+        args: [target, att.attestations[donor].registry_record_id, att.attestations[donor].signature],
+        fees,
+      });
+      const r = await client.waitForTransactionReceipt({ hash: h, waitUntil: "decided", retries: RETRIES });
+      const outcome = assessReceipt(r);
+      console.log(`mismatched attestation for ${target}: ${outcome} (${h}) - expected "failed"`);
+      save({ rejectedAttestationTx: { plot: target, signatureOf: donor, tx: h, outcome, expected: "failed" } });
+    } catch (e) {
+      console.log(`mismatched attestation rejected at submission: ${(e as Error).message?.slice(0, 160)}`);
+      save({ rejectedAttestationTx: { plot: target, signatureOf: donor, rejectedAt: "submission", error: (e as Error).message?.slice(0, 300) } });
+    }
+  }
+
+  // Independent plot provenance: the authority's signature is checked on-chain,
+  // then validators fetch the pinned cadastral manifest and match every field.
+  // Permissionless; anything else leaves the plot uninsurable.
   const provenanceTxs: Record<string, string> = {};
   for (const plotId of plotIds) {
     try {
-      const h = await client.writeContract({ address, functionName: "verify_plot_provenance", args: [plotId], fees });
+      const a = att.attestations[plotId];
+      const h = await client.writeContract({
+        address,
+        functionName: "verify_plot_provenance",
+        args: [plotId, a.registry_record_id, a.signature],
+        fees,
+      });
       const r = await client.waitForTransactionReceipt({ hash: h, waitUntil: "decided", retries: RETRIES });
       provenanceTxs[plotId] = h;
       console.log(`verify_plot_provenance(${plotId}): ${assessReceipt(r)} (${h})`);

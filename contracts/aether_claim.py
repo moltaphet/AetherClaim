@@ -15,12 +15,16 @@
 #      The observation URLs are built INSIDE the contract from registry data;
 #      no caller-supplied URL or coordinate ever reaches a fetch.
 #   2. Independent plot provenance. A plot is not insurable because the admin
-#      typed it. `verify_plot_provenance` makes validators fetch a cadastral
-#      manifest from a pinned, commit-addressed URL on a domain the admin does
-#      not control at call time, and check coordinates, 12 baselines, crop cycle,
-#      coverage cap, GHCN station and the eligible policyholder against it. The
-#      stored `cadastral_hash` must also be the SHA-256 commitment to exactly
-#      that record, so anyone can recompute it offline.
+#      typed it, and it is not insurable because a manifest in the project's own
+#      repository says so either. `verify_plot_provenance` first requires an
+#      Ed25519 ATTESTATION from the CADASTRAL AUTHORITY, a public key fixed at
+#      deployment that the admin cannot change and does not hold the private half
+#      of. The signature covers the authority's record id, the plot id, the
+#      SHA-256 `cadastral_hash` (a commitment to coordinates, 12 baselines, crop
+#      cycle, coverage cap and GHCN station) and the eligible policyholder. A
+#      fabricated, altered or mismatched plot has no such signature and the call
+#      reverts with ERR_INVALID_CADASTRAL_ATTESTATION. Only then do validators
+#      fetch the commit-pinned manifest and cross-check every field against it.
 #   3. Insurable interest. A plot binds to ONE eligible policyholder (the farm
 #      operator named in the manifest). Only that address can buy cover on it.
 #   4. No duplicate coverage. One live coverage window per plot, and the plot's
@@ -67,6 +71,7 @@ ERR_TRANSIENT = "[TRANSIENT]"  # non-deterministic upstream problem
 ERR_INELIGIBLE_POLICYHOLDER = "ERR_INELIGIBLE_POLICYHOLDER"
 ERR_DUPLICATE_PLOT_COVERAGE = "ERR_DUPLICATE_PLOT_COVERAGE"
 ERR_PROVENANCE_UNVERIFIED = "ERR_PROVENANCE_UNVERIFIED"
+ERR_INVALID_CADASTRAL_ATTESTATION = "ERR_INVALID_CADASTRAL_ATTESTATION"
 
 # --- Protocol constants ------------------------------------------------------
 DAY = 86400
@@ -117,6 +122,8 @@ REGISTRY_MANIFEST_URL = (
     "https://raw.githubusercontent.com/moltaphet/AetherClaim/3b39beb2f23a02f8074e9de5113996b16b115ac6/registry/cadastral_manifest.json"
 )
 CADASTRE_SCHEMA = "AETHERCLAIM-CADASTRE-V1"
+ATTESTATION_SCHEMA = "AETHERCLAIM-ATTESTATION-V1"
+RECORD_ID_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._:/-"
 
 # Discrete payout buckets: tier -> payout bps
 TIER_PAYOUT_BPS = {0: 0, 1: 3000, 2: 7000, 3: 10000}
@@ -170,6 +177,8 @@ class PlotDetails:
     provenance_verified: bool
     provenance_verified_at: u256
     provenance_manifest_sha256: str  # digest of the manifest bytes validators read
+    registry_record_id: str  # the cadastral authority's id for this parcel ("" until attested)
+    attestation_signature: str  # hex Ed25519 signature the authority issued for this plot
     active_coverage: u256  # unresolved coverage currently on this plot
     last_coverage_end: u256  # end_ts of the latest coverage window on this plot
 
@@ -291,6 +300,99 @@ def _cadastral_digest(plot_id, lat_e4, lon_e4, monthly, c_start, c_end, max_cov,
         ]
     )
     return hashlib.sha256(rec.encode("utf-8")).hexdigest()
+
+
+# --- Ed25519 (RFC 8032) signature verification -------------------------------
+# Pure Python so the contract needs nothing beyond the stdlib. Verification only:
+# the contract never holds a private key. Checked against the RFC 8032 test
+# vectors and against the `cryptography` package in tests/test_aether_claim.py.
+_ED_P = 2**255 - 19
+_ED_Q = 2**252 + 27742317777372353535851937790883648493
+_ED_D = -121665 * pow(121666, _ED_P - 2, _ED_P) % _ED_P
+_ED_SQRT_M1 = pow(2, (_ED_P - 1) // 4, _ED_P)
+
+
+def _ed_add(p, q):
+    a = (p[1] - p[0]) * (q[1] - q[0]) % _ED_P
+    b = (p[1] + p[0]) * (q[1] + q[0]) % _ED_P
+    c = 2 * p[3] * q[3] * _ED_D % _ED_P
+    d = 2 * p[2] * q[2] % _ED_P
+    e, f, g, h = b - a, d - c, d + c, b + a
+    return (e * f % _ED_P, g * h % _ED_P, f * g % _ED_P, e * h % _ED_P)
+
+
+def _ed_mul(s: int, p):
+    r = (0, 1, 1, 0)
+    while s > 0:
+        if s & 1:
+            r = _ed_add(r, p)
+        p = _ed_add(p, p)
+        s >>= 1
+    return r
+
+
+def _ed_recover_x(y: int, sign: int):
+    if y >= _ED_P:
+        return None
+    x2 = (y * y - 1) * pow(_ED_D * y * y + 1, _ED_P - 2, _ED_P) % _ED_P
+    if x2 == 0:
+        return None if sign else 0
+    x = pow(x2, (_ED_P + 3) // 8, _ED_P)
+    if (x * x - x2) % _ED_P != 0:
+        x = x * _ED_SQRT_M1 % _ED_P
+    if (x * x - x2) % _ED_P != 0:
+        return None
+    if (x & 1) != sign:
+        x = _ED_P - x
+    return x
+
+
+def _ed_decompress(b: bytes):
+    if len(b) != 32:
+        return None
+    y = int.from_bytes(b, "little")
+    sign = y >> 255
+    y &= (1 << 255) - 1
+    x = _ed_recover_x(y, sign)
+    return None if x is None else (x, y, 1, x * y % _ED_P)
+
+
+def _ed25519_verify(pub: bytes, msg: bytes, sig: bytes) -> bool:
+    if len(pub) != 32 or len(sig) != 64:
+        return False
+    a_pt = _ed_decompress(pub)
+    r_pt = _ed_decompress(sig[:32])
+    if a_pt is None or r_pt is None:
+        return False
+    s = int.from_bytes(sig[32:], "little")
+    if s >= _ED_Q:  # reject malleable / non-canonical S
+        return False
+    gy = 4 * pow(5, _ED_P - 2, _ED_P) % _ED_P
+    gx = _ed_recover_x(gy, 0)
+    if gx is None:
+        return False
+    base = (gx, gy, 1, gx * gy % _ED_P)
+    h = int.from_bytes(hashlib.sha512(sig[:32] + pub + msg).digest(), "little") % _ED_Q
+    lhs, rhs = _ed_mul(s, base), _ed_add(r_pt, _ed_mul(h, a_pt))
+    return (lhs[0] * rhs[2] - rhs[0] * lhs[2]) % _ED_P == 0 and (lhs[1] * rhs[2] - rhs[1] * lhs[2]) % _ED_P == 0
+
+
+def _hex_bytes(s, n: int):
+    """Strict lower/upper-case hex of exactly n bytes, else None."""
+    if not isinstance(s, str) or len(s) != 2 * n:
+        return None
+    if any(ch not in "0123456789abcdefABCDEF" for ch in s):
+        return None
+    return bytes.fromhex(s)
+
+
+def _valid_record_id(s) -> bool:
+    return isinstance(s, str) and 1 <= len(s) <= 64 and all(ch in RECORD_ID_CHARS for ch in s)
+
+
+def _attestation_message(record_id: str, plot_id: str, cadastral_hash: str, holder_hex: str) -> bytes:
+    """The exact bytes the cadastral authority signs for a plot."""
+    return "|".join([ATTESTATION_SCHEMA, record_id, plot_id, cadastral_hash.lower(), holder_hex.lower()]).encode("utf-8")
 
 
 def _window_baseline_tenths(monthly, w_start: datetime, w_end: datetime) -> int:
@@ -689,6 +791,7 @@ def _consensus_observation(urls, windows, baselines_tenths, conservative: bool):
 
 class AetherClaim(gl.contract.Contract):
     admin: Address
+    cadastral_authority: str  # hex Ed25519 public key; fixed at deployment, no setter
     pool_balance: u256  # free + reserved liquidity, excluding committed payouts
     total_liabilities: u256  # coverage reserved against live, unresolved policies
     committed_payouts: u256  # approved payouts not yet released
@@ -703,7 +806,12 @@ class AetherClaim(gl.contract.Contract):
     total_lp_shares: u256
     next_policy_id: u256
 
-    def __init__(self, max_epoch_exposure: int = 500 * 10**18, genesis_policyholder: str = ""):
+    def __init__(
+        self,
+        max_epoch_exposure: int = 500 * 10**18,
+        genesis_policyholder: str = "",
+        cadastral_authority: str = "",
+    ):
         if not (MIN_EXPOSURE_CAP <= max_epoch_exposure <= MAX_EXPOSURE_CAP):
             raise gl.vm.UserError(f"{ERR_EXPECTED} exposure cap out of bounds")
         if not _valid_hex_address(genesis_policyholder):
@@ -711,7 +819,11 @@ class AetherClaim(gl.contract.Contract):
         holder = Address(genesis_policyholder)
         if holder == gl.message.sender_address:
             raise gl.vm.UserError(f"{ERR_EXPECTED} Admin cannot be the eligible policyholder")
+        authority = _hex_bytes(cadastral_authority, 32)
+        if authority is None or _ed_decompress(authority) is None:
+            raise gl.vm.UserError(f"{ERR_EXPECTED} cadastral_authority must be a 32-byte Ed25519 public key (hex)")
         self.admin = gl.message.sender_address
+        self.cadastral_authority = cadastral_authority.lower()
         self.total_lp_shares = 0
         self.pool_balance = 0
         self.total_liabilities = 0
@@ -738,6 +850,8 @@ class AetherClaim(gl.contract.Contract):
                 provenance_verified=False,
                 provenance_verified_at=0,
                 provenance_manifest_sha256="",
+                registry_record_id="",
+                attestation_signature="",
                 active_coverage=0,
                 last_coverage_end=0,
             )
@@ -784,6 +898,8 @@ class AetherClaim(gl.contract.Contract):
             "provenance_verified": bool(p.provenance_verified),
             "provenance_verified_at": int(p.provenance_verified_at),
             "provenance_manifest_sha256": p.provenance_manifest_sha256,
+            "registry_record_id": p.registry_record_id,
+            "attestation_signature": p.attestation_signature,
             "active_coverage": str(p.active_coverage),
             "last_coverage_end": locked_until,
             "coverage_locked": bool(now <= locked_until),
@@ -879,6 +995,8 @@ class AetherClaim(gl.contract.Contract):
             "max_revisions": MAX_REVISIONS,
             "registry_manifest_url": REGISTRY_MANIFEST_URL,
             "cadastre_schema": CADASTRE_SCHEMA,
+            "attestation_schema": ATTESTATION_SCHEMA,
+            "cadastral_authority": self.cadastral_authority,
         }
 
     @gl.public.view
@@ -1102,18 +1220,26 @@ class AetherClaim(gl.contract.Contract):
             provenance_verified=False,
             provenance_verified_at=0,
             provenance_manifest_sha256="",
+            registry_record_id="",
+            attestation_signature="",
             active_coverage=0,
             last_coverage_end=0,
         )
         self.plot_ids.append(plot_id)
 
     @gl.public.write
-    def verify_plot_provenance(self, plot_id: str) -> dict:
-        """Permissionless. Validators fetch the pinned cadastral manifest and
-        check, field by field, that it describes this plot: coordinates, the 12
-        monthly baselines, crop cycle, coverage cap, GHCN station and eligible
-        policyholder, plus that cadastral_hash is the SHA-256 of that record.
-        Only an exact match marks the plot verified. A mismatch writes nothing."""
+    def verify_plot_provenance(self, plot_id: str, registry_record_id: str, attestation_signature: str) -> dict:
+        """Permissionless. A plot becomes insurable only when BOTH hold:
+
+        1. The CADASTRAL AUTHORITY (the Ed25519 key fixed at deployment) signed
+           this exact plot: its record id, plot id, `cadastral_hash` and eligible
+           policyholder. A fabricated, altered or mismatched plot has no such
+           signature and the call reverts with ERR_INVALID_CADASTRAL_ATTESTATION
+           before anything is fetched or written.
+        2. Validators fetch the commit-pinned manifest and it matches the plot
+           field by field (coordinates, 12 baselines, crop cycle, coverage cap,
+           GHCN station, policyholder, and the SHA-256 of that record). A manifest
+           mismatch returns verified=false and writes nothing."""
         if plot_id not in self.plots:
             raise gl.vm.UserError(f"{ERR_EXPECTED} unknown plot")
         p = self.plots[plot_id]
@@ -1124,6 +1250,15 @@ class AetherClaim(gl.contract.Contract):
                 "code": "ALREADY_VERIFIED",
                 "manifest_sha256": p.provenance_manifest_sha256,
             }
+        pub = _hex_bytes(self.cadastral_authority, 32)
+        sig = _hex_bytes(attestation_signature, 64)
+        if pub is None or sig is None or not _valid_record_id(registry_record_id):
+            raise gl.vm.UserError(f"{ERR_EXPECTED} {ERR_INVALID_CADASTRAL_ATTESTATION}: malformed attestation")
+        message = _attestation_message(registry_record_id, plot_id, p.cadastral_hash, p.eligible_policyholder.as_hex)
+        if not _ed25519_verify(pub, message, sig):
+            raise gl.vm.UserError(
+                f"{ERR_EXPECTED} {ERR_INVALID_CADASTRAL_ATTESTATION}: the cadastral authority did not sign this plot"
+            )
         expected = {
             "latitude_e4": int(p.latitude_e4),
             "longitude_e4": int(p.longitude_e4),
@@ -1155,6 +1290,8 @@ class AetherClaim(gl.contract.Contract):
             p.provenance_verified = True
             p.provenance_verified_at = self._now()
             p.provenance_manifest_sha256 = res["manifest_sha256"]
+            p.registry_record_id = registry_record_id
+            p.attestation_signature = attestation_signature.lower()
         return {
             "plot_id": plot_id,
             "verified": bool(res["verified"]),
@@ -1205,7 +1342,7 @@ class AetherClaim(gl.contract.Contract):
             raise gl.vm.UserError(f"{ERR_EXPECTED} plot not active")
         if not plot_rec.provenance_verified:
             raise gl.vm.UserError(
-                f"{ERR_EXPECTED} {ERR_PROVENANCE_UNVERIFIED}: plot has not been verified against the cadastral manifest"
+                f"{ERR_EXPECTED} {ERR_PROVENANCE_UNVERIFIED}: plot has no valid cadastral-authority attestation and manifest match"
             )
         # Insurable interest: only the registry-bound farm operator may insure it.
         if sender != plot_rec.eligible_policyholder:

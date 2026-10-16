@@ -7,10 +7,15 @@ explicitly through ``direct_vm.run_validator`` with swapped mocks.
 import hashlib
 import json
 import os
+import sys
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
 # The pinned runner (py-genlayer:5jycge...) ships in the v0.6.0-rc5 GenVM tree.
 os.environ.setdefault("GENVM_VERSION", "v0.6.0-rc5")
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "registry"))
+import attest as authority  # noqa: E402  (the cadastral-authority signer under test)
 
 CONTRACT = "contracts/aether_claim.py"
 ATTO = 10**18
@@ -203,3 +208,29 @@ def genesis_records(holder_hex: str) -> dict:
     for pid, (_n, _crop, lat, lon, monthly, c_start, c_end, station) in GENESIS.items():
         out[pid] = manifest_record(pid, lat, lon, monthly, c_start, c_end, GENESIS_MAX_COVERAGE, station, holder_hex)
     return out
+
+
+# ------------------------------------------------- cadastral-authority attestation
+# A deterministic test authority. Its private seed lives only in the test process;
+# the contract is deployed with the PUBLIC half. A second key plays the attacker.
+AUTHORITY_SEED = hashlib.sha256(b"aetherclaim-test-cadastral-authority").digest()
+AUTHORITY_PUB = authority.public_key(AUTHORITY_SEED).hex()
+ROGUE_SEED = hashlib.sha256(b"aetherclaim-test-rogue-signer").digest()
+
+
+def record_id(plot_id: str) -> str:
+    return f"TEST-REC-{plot_id}"
+
+
+def attestation_for(c, plot_id: str, seed: bytes = AUTHORITY_SEED):
+    """(registry_record_id, signature) the authority would issue for the plot as
+    it is stored on-chain right now."""
+    p = c.get_plot(plot_id)
+    rid = record_id(plot_id)
+    return rid, authority.attest(seed, rid, plot_id, p["cadastral_hash"], p["eligible_policyholder"])
+
+
+def verify_plot(c, plot_id: str, seed: bytes = AUTHORITY_SEED):
+    """verify_plot_provenance with a genuine attestation from `seed`."""
+    rid, sig = attestation_for(c, plot_id, seed)
+    return c.verify_plot_provenance(plot_id, rid, sig)
