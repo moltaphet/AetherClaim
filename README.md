@@ -12,7 +12,7 @@ observed rainfall.
 | **Contract (canonical)** | **`0x2D22196a3cA2278966265806e036580BDe428F23`** |
 | Explorer | https://explorer-studio-next.genlayer.com/address/0x2D22196a3cA2278966265806e036580BDe428F23 |
 | Source SHA-256 | `4f76eba4511bf661356a541770cdc82c08d53eb19de98ec8be764c5b805f6a28` (`contracts/aether_claim.py`) |
-| Exact deployed source | https://github.com/moltaphet/AetherClaim/blob/6d742cfbf3f6485ff3ee63c1fb69a85488d95213/contracts/aether_claim.py (SHA-256 above) |
+| Exact deployed source | https://github.com/moltaphet/AetherClaim/blob/542aa1ac341c17e4ae0fc5ea5d70e044af23c6a2/contracts/aether_claim.py (SHA-256 above) |
 | Deploy transaction | `0xad3bc528df5e62520a0e2ef99cb22c8cde0ae1483b45c7965c59efdeaf17e1a3` |
 | Plot provenance transactions | see `deployments/studio-next.json` → `provenanceTxs` |
 | **Cadastral authority public key** (immutable, set at deploy) | `961559db8703df4434ca9346c6c4108baaaf475127b8614327ddf115762449b4` (Ed25519; readable via `get_config().cadastral_authority`) |
